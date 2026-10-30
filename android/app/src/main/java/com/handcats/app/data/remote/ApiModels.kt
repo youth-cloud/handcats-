@@ -15,4 +15,6 @@ import kotlinx.serialization.Serializable
 @Serializable data class Observation(val id: String, @SerialName("created_at") val createdAt: String, @SerialName("image_url") val imageUrl: String, val status: String, val note: String = "", val favorite: Boolean = false, val confirmed: Boolean = false, val detections: List<DetectionItem> = emptyList(), val message: String = "", @SerialName("confirmed_detection_ids") val confirmedDetectionIds: List<Long>? = null)
 @Serializable data class ObservationPage(val items: List<Observation>, val total: Int)
 @Serializable data class ObservationEdit(val note: String? = null, val favorite: Boolean? = null, val confirmed: Boolean? = null, @SerialName("confirmed_detection_ids") val confirmedDetectionIds: List<Long>? = null)
+@Serializable data class ReviewSuggestion(val label: String, @SerialName("cat_code") val catCode: String, val confidence: Float)
+@Serializable data class ReviewResponse(val success: Boolean, val model: String, val suggestions: List<ReviewSuggestion> = emptyList(), val explanation: String = "", val message: String)
 @Serializable data class HealthResponse(val status: String)

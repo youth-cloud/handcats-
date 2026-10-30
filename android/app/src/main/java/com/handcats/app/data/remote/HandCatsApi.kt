@@ -16,5 +16,6 @@ interface HandCatsApi {
     @GET("api/v1/observations") suspend fun observations(@Query("offset") offset: Int = 0, @Query("limit") limit: Int = 30, @Query("cat_code") catCode: String? = null): ObservationPage
     @Multipart @POST("api/v1/observations") suspend fun upload(@Part file: MultipartBody.Part, @Header("X-Request-ID") requestId: String): Observation
     @PATCH("api/v1/observations/{id}") suspend fun edit(@Path("id") id: String, @Body body: ObservationEdit): Observation
+    @POST("api/v1/observations/{id}/review") suspend fun review(@Path("id") id: String): ReviewResponse
     @DELETE("api/v1/observations/{id}") suspend fun delete(@Path("id") id: String)
 }

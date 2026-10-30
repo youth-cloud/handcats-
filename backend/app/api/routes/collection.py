@@ -18,9 +18,12 @@ from app.core.security import current_user
 from app.db.models import CatType, Detection, Observation, User, UserObservation
 from app.db.session import get_session
 from app.services.catalog import CATALOG, code_for_label
+from app.schemas.review import ReviewResponse
+from app.services.deepseek_review import DeepSeekReviewService
 
 router = APIRouter(tags=["collection"])
 inference_gate = asyncio.Semaphore(1)
+review_service = DeepSeekReviewService()
 
 
 def normalize_image(data: bytes) -> bytes:
@@ -157,6 +160,19 @@ async def upload(file: UploadFile = File(...), x_request_id: uuid.UUID = Header(
 @router.get("/observations/{observation_id}")
 async def detail(observation_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_session)):
     return observation_dict(*await owned(observation_id, user, db))
+
+
+@router.post("/observations/{observation_id}/review", response_model=ReviewResponse)
+async def review(observation_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_session)):
+    """Run an optional DeepSeek visual second opinion on a saved photo."""
+    obs, _ = await owned(observation_id, user, db)
+    path = Path(settings.upload_dir) / Path(obs.image_path).name
+    if not path.is_file():
+        raise HTTPException(404, "照片文件不存在")
+    image = await asyncio.to_thread(path.read_bytes)
+    labels = [d.cat_type.display_name if d.cat_type else d.raw_label for d in obs.detections]
+    async with inference_gate:
+        return await review_service.review(image, labels)
 
 
 @router.get("/observations/{observation_id}/image")

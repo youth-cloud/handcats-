@@ -28,6 +28,8 @@ backend/    API 与后端测试
 
 后端使用 Python 3.11+ 和 PostgreSQL。配置项见 `backend/.env.example`，本地配置保存在 `backend/.env`。`MODEL_WEIGHTS_PATH` 指向本机模型权重，`DATABASE_URL` 指向 PostgreSQL。服务启动时初始化表和图鉴类别。
 
+可选的智能复核使用 DeepSeek 图像理解接口。将 `DEEPSEEK_API_KEY` 写入服务器端 `backend/.env`，并按账户可用模型设置 `DEEPSEEK_MODEL`（官方视觉接口文档中的模型名为 `deepseek-flash`）。密钥只在后端使用，客户端不会保存或上传密钥。
+
 ```bash
 cd backend
 pip install -r requirements.txt

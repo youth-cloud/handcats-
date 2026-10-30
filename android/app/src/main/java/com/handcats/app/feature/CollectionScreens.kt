@@ -168,6 +168,29 @@ import com.handcats.app.ui.theme.*
         Text(if(item.detections.size>1)"这次，遇见了它们" else observationTitle(item),style=MaterialTheme.typography.headlineMedium)
         if(item.detections.size>1)Text("照片中有 ${item.detections.size} 个猫咪识别结果，编号对应下方卡片。",color=Muted)
         Text(item.message,color=Muted)
+        if (reviewObservationId(vm, item)) {
+            vm.review?.let { result ->
+                Paper(color = if (result.success) Mint else Peach) {
+                    Text("智能复核", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(6.dp))
+                    Text(result.message, color = Muted, style = MaterialTheme.typography.bodySmall)
+                    result.suggestions.forEach { suggestion ->
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(suggestion.label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                            Text("${(suggestion.confidence * 100).toInt()}%", color = Forest, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    if (result.explanation.isNotBlank()) Text(result.explanation, color = Muted, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        OutlinedButton(
+            onClick = { vm.requestReview(item) },
+            enabled = !vm.busy,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) { Text(if (vm.review != null && reviewObservationId(vm, item)) "重新智能复核" else "识别有误？请智能复核") }
         if(item.detections.isNotEmpty()) Paper {
             Text("逐只核对",style=MaterialTheme.typography.titleMedium)
             item.detections.forEachIndexed{index,d->
@@ -202,3 +225,5 @@ import com.handcats.app.ui.theme.*
     }
     if(confirmDelete)AlertDialog(onDismissRequest={if(!vm.busy)confirmDelete=false},title={Text("删除这次相遇？")},text={Column{Text("照片与识别记录将一起删除，无法恢复。若这是该类别唯一的收集记录，对应图鉴将恢复为待遇见。");vm.error?.let{Text(it,color=MaterialTheme.colorScheme.error)}}},confirmButton={TextButton(onClick={vm.delete(item){confirmDelete=false;back()}},enabled=!vm.busy){Text("确认删除",color=MaterialTheme.colorScheme.error)}},dismissButton={TextButton(onClick={confirmDelete=false},enabled=!vm.busy){Text("保留")}})
 }
+
+private fun reviewObservationId(vm: CatsViewModel, item: Observation): Boolean = vm.reviewObservationId == item.id

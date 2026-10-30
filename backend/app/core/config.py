@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     upload_dir: str = str(BACKEND_ROOT / "storage" / "photos")
     session_days: int = 30
     max_upload_bytes: int = 12 * 1024 * 1024
+    # Optional visual second opinion. Keep the key on the server only.
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-flash"
+    deepseek_timeout_seconds: float = 45.0
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_ROOT / ".env",

@@ -49,6 +49,8 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
     private var categoryJob: Job? = null
     private var categoryRequest = 0
     var selected by mutableStateOf<Observation?>(null); private set
+    var review by mutableStateOf<ReviewResponse?>(null); private set
+    var reviewObservationId by mutableStateOf<String?>(null); private set
     var pendingPhoto by mutableStateOf<File?>(null); private set
     private var requestId = UUID.randomUUID().toString()
     var photoRevision by mutableStateOf(0); private set
@@ -141,7 +143,11 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
             finally { if (request == categoryRequest) categoryLoading = false }
         }
     }
-    fun select(item: Observation?) { selected = item }
+    fun select(item: Observation?) { selected = item; review = null; reviewObservationId = null }
+    fun requestReview(item: Observation) = action {
+        reviewObservationId = item.id
+        review = api.review(item.id)
+    }
     fun choosePhoto(file: File) { pendingPhoto?.takeIf { it != file }?.delete(); pendingPhoto = file; requestId = UUID.randomUUID().toString(); photoRevision++; clearMessage() }
     fun discardPhoto() { pendingPhoto?.delete(); pendingPhoto = null; clearMessage() }
     fun importPhoto(uri: Uri) = action {
@@ -195,7 +201,7 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
     private fun clearSession() {
         categoryRequest++; categoryJob?.cancel(); categoryCode = null; categoryObservations = emptyList()
         categoryTotal = 0; categoryLoading = false; categoryFailed = false
-        store.clear(); token = null; user = null; cats = emptyList(); observations = emptyList(); total = 0; selected = null; discardPhoto()
+        store.clear(); token = null; user = null; cats = emptyList(); observations = emptyList(); total = 0; selected = null; review = null; reviewObservationId = null; discardPhoto()
     }
     fun logout(done: () -> Unit) = action { api.logout(); clearSession(); done() }
     fun deleteAccount(password: String, done: () -> Unit) = action { api.deleteAccount(AccountRemoval(password)); clearSession(); notice = "账号及相遇数据已删除"; done() }
