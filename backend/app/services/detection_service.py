@@ -42,6 +42,7 @@ class DetectionService:
                 iou=settings.model_iou_threshold,
                 device="cpu",
                 verbose=False,
+                imgsz=settings.model_image_size,
             )
             return self._build_response(results=results)
         except Exception as exc:  # pragma: no cover - depends on runtime model and image input
@@ -60,11 +61,17 @@ class DetectionService:
         """Warm up the model during application startup to avoid first-request timeouts."""
         model = self._get_model()
         if model is None:
+            if settings.production:
+                raise RuntimeError("Production model failed to load; check weights and runtime")
             logger.warning(
                 "YOLO26 preload skipped because the model is unavailable: %s",
                 self._model_load_error,
             )
         else:
+            if settings.production:
+                import numpy as np
+                model.predict(source=np.zeros((settings.model_image_size, settings.model_image_size, 3), dtype=np.uint8),
+                              imgsz=settings.model_image_size, device="cpu", verbose=False)
             logger.info("YOLO26 model preloaded successfully.")
 
     def _get_model(self) -> Any | None:
@@ -74,6 +81,11 @@ class DetectionService:
             return None
 
         try:
+            if settings.production:
+                os.environ["YOLO_AUTOINSTALL"] = "false"
+            os.environ.setdefault("OMP_NUM_THREADS", str(settings.model_cpu_threads))
+            import torch
+            torch.set_num_threads(settings.model_cpu_threads)
             from ultralytics import YOLO
 
             model_source = self._resolve_model_source()
@@ -90,6 +102,8 @@ class DetectionService:
             return None
 
     def _resolve_model_source(self) -> str:
+        if settings.production and not Path(settings.model_weights_path).is_file():
+            raise ValueError("Production requires an explicit existing model file")
         if settings.model_weights_path.strip():
             return settings.model_weights_path.strip()
 

@@ -83,6 +83,8 @@ async def issue_session(user, db):
 @router.post("/register", status_code=201)
 async def register(body: Registration, request: Request, db: AsyncSession = Depends(get_session)):
     limit_auth(request)
+    if not settings.registration_enabled:
+        raise HTTPException(403, "当前为小范围测试，暂未开放注册")
     user = User(username=body.username, nickname=body.nickname,
                 password_hash=await asyncio.to_thread(hash_password, body.password))
     db.add(user)

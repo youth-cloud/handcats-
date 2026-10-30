@@ -31,6 +31,13 @@
 !/backend/requirements.txt
 !/backend/requirements-dev.txt
 !/backend/.env.example
+!/backend/deploy/
+!/backend/deploy/**
+!/backend/scripts/
+!/backend/scripts/benchmark_model.py
+!/backend/scripts/check_concurrency.py
+!/backend/scripts/create_test_user.py
+!/backend/requirements-onnx.txt
 
 # IDE, build and Python caches.
 .idea/

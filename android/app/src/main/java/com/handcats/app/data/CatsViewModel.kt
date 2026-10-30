@@ -51,6 +51,7 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
     var selected by mutableStateOf<Observation?>(null); private set
     var review by mutableStateOf<ReviewResponse?>(null); private set
     var reviewObservationId by mutableStateOf<String?>(null); private set
+    var reviewing by mutableStateOf(false); private set
     var pendingPhoto by mutableStateOf<File?>(null); private set
     private var requestId = UUID.randomUUID().toString()
     var photoRevision by mutableStateOf(0); private set
@@ -145,8 +146,25 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun select(item: Observation?) { selected = item; review = null; reviewObservationId = null }
     fun requestReview(item: Observation) = action {
-        reviewObservationId = item.id
-        review = api.review(item.id)
+        review = null; reviewObservationId = null; reviewing = true
+        val sessionToken = token
+        try {
+            val result = api.review(item.id)
+            if (selected?.id == item.id && token == sessionToken) {
+                review = result; reviewObservationId = item.id
+            }
+        } finally { reviewing = false }
+    }
+    fun applyReview(item: Observation, result: ReviewResponse, indices: List<Int>) = action {
+        val resultId = result.reviewId ?: return@action
+        val updated = api.applyReview(item.id, ReviewApply(resultId, indices))
+        selected = updated
+        observations = observations.map { if (it.id == updated.id) updated else it }
+        // Accepted review may change the category in which this record belongs.
+        cats = api.catalog()
+        categoryCode?.let { loadCategory(it) }
+        review = null; reviewObservationId = null
+        notice = "已采用复核结果并收进图鉴，原识别结果保留在手记中"
     }
     fun choosePhoto(file: File) { pendingPhoto?.takeIf { it != file }?.delete(); pendingPhoto = file; requestId = UUID.randomUUID().toString(); photoRevision++; clearMessage() }
     fun discardPhoto() { pendingPhoto?.delete(); pendingPhoto = null; clearMessage() }
@@ -175,7 +193,7 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
         val file = pendingPhoto ?: return@action
         val part = MultipartBody.Part.createFormData("file", file.name, file.asRequestBody("image/jpeg".toMediaType()))
         val result = api.upload(part, requestId)
-        selected = result; discardPhoto()
+        select(result); discardPhoto()
         val existed = observations.any { it.id == result.id }
         observations = listOf(result) + observations.filterNot { it.id == result.id }; if (!existed) total++
         onSuccess()

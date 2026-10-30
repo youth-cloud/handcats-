@@ -1,0 +1,41 @@
+[Unit]
+Description=Handcats API
+After=network-online.target postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=handcats
+Group=handcats
+WorkingDirectory=/opt/handcats/backend
+LoadCredentialEncrypted=backend.env:/etc/credstore.encrypted/handcats.env
+Environment=PYTHONUNBUFFERED=1
+Environment=YOLO_AUTOINSTALL=false
+Environment=YOLO_CONFIG_DIR=/var/lib/handcats/ultralytics
+Environment=OMP_NUM_THREADS=2
+Environment=MKL_NUM_THREADS=2
+Environment=OPENBLAS_NUM_THREADS=2
+Environment=NUMEXPR_NUM_THREADS=2
+# Only Nginx on loopback is allowed to supply forwarding headers.
+ExecStart=/bin/sh -c 'export HANDCATS_ENV_FILE="$CREDENTIALS_DIRECTORY/backend.env"; exec /opt/handcats/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --limit-concurrency 32 --timeout-keep-alive 5 --timeout-graceful-shutdown 90 --no-access-log'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=100
+UMask=0077
+StateDirectory=handcats
+StateDirectoryMode=0700
+CacheDirectory=handcats
+Environment=XDG_CACHE_HOME=/var/cache/handcats
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictSUIDSGID=true
+LimitNOFILE=4096
+MemoryMax=3G
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

@@ -165,8 +165,8 @@ import com.handcats.app.ui.theme.*
         PageHeader("这一次相遇",displayDate(item.createdAt),back,action={IconButton(onClick={vm.edit(item,ObservationEdit(favorite=!item.favorite))},enabled=!vm.busy,modifier=Modifier.semantics{contentDescription=if(item.favorite)"取消收藏" else "收藏照片"}){Glyph(Symbol.Heart,color=if(item.favorite)Orange else Muted)}})
         RemotePhoto(vm,item.imageUrl,Modifier.fillMaxWidth().height(340.dp).clip(RoundedCornerShape(26.dp)),ContentScale.Fit,item.detections,focusedIndex)
         Tag(if(item.confirmed)"已收集 ${savedIds.size} 项猫咪结果" else if(canCollect)"识别完成 · 请逐一核对" else "相遇已记录")
-        Text(if(item.detections.size>1)"这次，遇见了它们" else observationTitle(item),style=MaterialTheme.typography.headlineMedium)
-        if(item.detections.size>1)Text("照片中有 ${item.detections.size} 个猫咪识别结果，编号对应下方卡片。",color=Muted)
+        Text(observationTitle(item),style=MaterialTheme.typography.headlineMedium)
+        if(item.detections.size>1)Text("共保留 ${item.detections.size} 项识别与复核结果。带定位框的结果可在照片上按编号核对。",color=Muted)
         Text(item.message,color=Muted)
         if (reviewObservationId(vm, item)) {
             vm.review?.let { result ->
@@ -174,14 +174,27 @@ import com.handcats.app.ui.theme.*
                     Text("智能复核", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(6.dp))
                     Text(result.message, color = Muted, style = MaterialTheme.typography.bodySmall)
-                    result.suggestions.forEach { suggestion ->
+                    var selectedReviewIndices by rememberSaveable(item.id, result.reviewId) { mutableStateOf(emptyList<Int>()) }
+                    result.suggestions.forEachIndexed { index, suggestion ->
                         Spacer(Modifier.height(8.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(suggestion.label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                             Text("${(suggestion.confidence * 100).toInt()}%", color = Forest, fontWeight = FontWeight.Bold)
+                            if (suggestion.catCode != null && result.reviewId != null) Checkbox(
+                                checked = index in selectedReviewIndices,
+                                onCheckedChange = { checked -> selectedReviewIndices = if (checked) (selectedReviewIndices + index).distinct() else selectedReviewIndices - index },
+                                enabled = !vm.busy,
+                                modifier = Modifier.semantics { contentDescription = "收集复核结果 ${index + 1}：${suggestion.label}" }
+                            )
                         }
+                        if (suggestion.catCode == null) Text("此物种或类别还未添加到图鉴中，请等待后续更新。", color = Muted, style = MaterialTheme.typography.bodySmall)
                     }
                     if (result.explanation.isNotBlank()) Text(result.explanation, color = Muted, style = MaterialTheme.typography.bodySmall)
+                    if (result.success && result.reviewId != null && result.suggestions.any { it.catCode != null }) {
+                        Spacer(Modifier.height(12.dp))
+                        Text("勾选正确的复核结果收进图鉴。保存后，本照片原先勾选的识别结果将撤销收集，避免重复或错误点亮。", color = Muted, style = MaterialTheme.typography.bodySmall)
+                        PrimaryButton("采用所选结果，收进图鉴", { vm.applyReview(item, result, selectedReviewIndices) }, enabled = selectedReviewIndices.isNotEmpty(), loading = vm.busy, symbol = Symbol.Book)
+                    }
                 }
             }
         }
@@ -190,14 +203,15 @@ import com.handcats.app.ui.theme.*
             enabled = !vm.busy,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp)
-        ) { Text(if (vm.review != null && reviewObservationId(vm, item)) "重新智能复核" else "识别有误？请智能复核") }
+        ) { Text(if (vm.reviewing) "正在智能复核…" else if (vm.review != null && reviewObservationId(vm, item)) "重新智能复核" else "识别有误？请智能复核") }
+        if (vm.reviewing) Text("正在查看这张照片，结果返回后会显示在这里。", color = Muted, style = MaterialTheme.typography.bodySmall)
         if(item.detections.isNotEmpty()) Paper {
             Text("逐只核对",style=MaterialTheme.typography.titleMedium)
             item.detections.forEachIndexed{index,d->
                 Spacer(Modifier.height(14.dp))
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(if(focusedIndex==index)Mint else Cream).clickable{focusedIndex=index}.padding(12.dp)) {
                     Row(verticalAlignment=Alignment.CenterVertically) {
-                        Tag("${index+1} 号",color=Color.White,background=detectionColor(index))
+                        Tag(if(d.source=="deepseek")"${index+1} 复核" else "${index+1} 号",color=Color.White,background=detectionColor(index))
                         Spacer(Modifier.width(8.dp))
                         Text("${(d.confidence*100).toInt()}%",color=detectionColor(index),fontWeight=FontWeight.Bold,modifier=Modifier.weight(1f))
                         if(d.catCode!=null && d.id!=null)Checkbox(checked=d.id in chosenIds,onCheckedChange={checked->chosenIds=if(checked)(chosenIds+d.id).distinct() else chosenIds-d.id;focusedIndex=index},enabled=!vm.busy,modifier=Modifier.semantics{contentDescription="收集 ${index+1} 号猫咪"})

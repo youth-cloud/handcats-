@@ -29,6 +29,7 @@ class Observation(Base):
     image_path: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(32), default="processed", index=True)
     model_version: Mapped[str | None] = mapped_column(String(100))
+    review_result: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     detections: Mapped[list[Detection]] = relationship(back_populates="observation", cascade="all, delete-orphan")

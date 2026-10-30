@@ -1,0 +1,6 @@
+[Unit]
+Description=Consistent Handcats database and photo backup
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/handcats/backend/deploy/backup.sh

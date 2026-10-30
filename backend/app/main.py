@@ -16,6 +16,8 @@ from app.db.session import engine
 
 @asynccontextmanager
 async def lifespan(app):
+    if settings.production and (settings.debug or settings.database_echo):
+        raise RuntimeError("Production requires DEBUG=false and DATABASE_ECHO=false")
     await initialize_database()
     await asyncio.to_thread(detection_service.preload_model)
     yield
@@ -28,6 +30,9 @@ def create_application() -> FastAPI:
         version=settings.app_version,
         debug=settings.debug,
         lifespan=lifespan,
+        docs_url=None if settings.production else "/docs",
+        redoc_url=None if settings.production else "/redoc",
+        openapi_url=None if settings.production else "/openapi.json",
     )
     app.include_router(health_router)
     app.include_router(detection_router, prefix=settings.api_prefix)

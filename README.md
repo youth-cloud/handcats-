@@ -30,6 +30,10 @@ backend/    API 与后端测试
 
 可选的智能复核使用 DeepSeek 图像理解接口。将 `DEEPSEEK_API_KEY` 写入服务器端 `backend/.env`，并按账户可用模型设置 `DEEPSEEK_MODEL`（官方视觉接口文档中的模型名为 `deepseek-flash`）。密钥只在后端使用，客户端不会保存或上传密钥。
 
+复核结果可按只勾选收进图鉴；图鉴外类别保留鉴定名称并提示尚未收录。相机支持双指缩放、倍率滑条与设备开放的镜头切换。
+
+Ubuntu 云服务器的小范围生产部署、ONNX 与 PT 对比、HTTPS、systemd 加密配置、并发验收和备份步骤见 [`backend/deploy/README.md`](backend/deploy/README.md)。
+
 ```bash
 cd backend
 pip install -r requirements.txt

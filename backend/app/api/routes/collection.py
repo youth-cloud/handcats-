@@ -20,9 +20,9 @@ from app.db.session import get_session
 from app.services.catalog import CATALOG, code_for_label
 from app.schemas.review import ReviewResponse
 from app.services.deepseek_review import DeepSeekReviewService
+from app.services.work_gate import inference_gate, review_gate, upload_throttle, review_throttle, review_budget
 
 router = APIRouter(tags=["collection"])
-inference_gate = asyncio.Semaphore(1)
 review_service = DeepSeekReviewService()
 
 
@@ -58,6 +58,7 @@ def observation_dict(obs, owner):
     detections = [dict(id=d.id, label=d.cat_type.display_name if d.cat_type else d.raw_label, confidence=float(d.confidence),
                        bounding_box=d.bounding_box.get("xyxy", []),
                        cat_code=d.cat_type.code if d.cat_type else None,
+                       source="deepseek" if d.bounding_box.get("review_id") else "yolo",
                        confirmed=bool(owner.confirmed and d.cat_type_id and (selected_ids is None or d.id in selected_ids))) for d in obs.detections]
     # Stable numbering in photo overlays, cards, and saved selection.
     detections.sort(key=lambda d: (-d["confidence"], d["id"]))
@@ -113,18 +114,26 @@ async def upload(file: UploadFile = File(...), x_request_id: uuid.UUID = Header(
     prior = await db.scalar(select(UserObservation).where(UserObservation.request_id == request_key))
     if prior:
         return observation_dict(*await owned(prior.observation_id, user, db))
+    upload_throttle.check(user.id)
+    # Release the DB connection before upload processing / CPU queueing.
+    await db.commit()
     raw = await file.read(settings.max_upload_bytes + 1)
     await file.close()
     if len(raw) > settings.max_upload_bytes:
         raise HTTPException(413, "照片超过 12 MB，请压缩后再试")
-    image = await asyncio.to_thread(normalize_image, raw)
-    async with inference_gate:
-        result = await asyncio.to_thread(service.detect_cat, image, "photo.jpg")
+    def process():
+        image = normalize_image(raw)
+        return image, service.detect_cat(image, "photo.jpg")
+    image, result = await inference_gate.run_sync(process)
     if not result.success:
         raise HTTPException(503, "识别服务暂时不可用，请稍后重试；照片尚未保存")
     # Coordinate with account removal before persisting an in-flight inference.
     if await db.scalar(select(User.id).where(User.id == user.id).with_for_update()) is None:
         raise HTTPException(401, "账号已注销，照片未保存")
+    # Recheck after the user lock: retries that arrived together must not save twice.
+    prior = await db.scalar(select(UserObservation).where(UserObservation.request_id == request_key))
+    if prior:
+        return observation_dict(*await owned(prior.observation_id, user, db))
     categories = {c.code: c for c in (await db.scalars(select(CatType))).all()}
     observation_id = uuid.uuid4()
     directory = Path(settings.upload_dir)
@@ -166,13 +175,69 @@ async def detail(observation_id: uuid.UUID, user: User = Depends(current_user), 
 async def review(observation_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_session)):
     """Run an optional DeepSeek visual second opinion on a saved photo."""
     obs, _ = await owned(observation_id, user, db)
+    review_throttle.check(user.id)
+    review_budget.check("server")
     path = Path(settings.upload_dir) / Path(obs.image_path).name
     if not path.is_file():
         raise HTTPException(404, "照片文件不存在")
     image = await asyncio.to_thread(path.read_bytes)
     labels = [d.cat_type.display_name if d.cat_type else d.raw_label for d in obs.detections]
-    async with inference_gate:
-        return await review_service.review(image, labels)
+    await db.commit()
+    async with review_gate.slot():
+        try:
+            async with asyncio.timeout(settings.deepseek_timeout_seconds + 5):
+                result = await review_service.review(image, labels)
+        except TimeoutError:
+            raise HTTPException(504, "智能复核超时，请稍后重试") from None
+    # Recheck ownership after a potentially long external request (deletion/logout).
+    obs, _ = await owned(observation_id, user, db)
+    await db.execute(select(Observation.id).where(Observation.id == observation_id).with_for_update())
+    if result.success:
+        result.review_id = str(uuid.uuid4())
+        obs.review_result = result.model_dump()
+        await db.commit()
+    return result
+
+
+class ReviewApply(BaseModel):
+    review_id: uuid.UUID
+    selected_indices: list[int] = Field(min_length=1, max_length=100)
+
+
+@router.post("/observations/{observation_id}/review/apply")
+async def apply_review(observation_id: uuid.UUID, body: ReviewApply,
+                       user: User = Depends(current_user), db: AsyncSession = Depends(get_session)):
+    # Serialize accept/retry requests so one reviewed animal creates one row.
+    await db.execute(select(Observation.id).join(UserObservation).where(
+        Observation.id == observation_id, UserObservation.user_id == user.id).with_for_update())
+    obs, owner = await owned(observation_id, user, db)
+    saved = obs.review_result or {}
+    if saved.get("review_id") != str(body.review_id):
+        raise HTTPException(409, "复核结果已更新，请重新复核后再收集")
+    rows = saved.get("suggestions", [])
+    indices = sorted(set(body.selected_indices))
+    if any(i < 0 or i >= len(rows) or not code_for_label(rows[i].get("label", "")) for i in indices):
+        raise HTTPException(400, "只能收集本次复核中已有图鉴类别的结果")
+    categories = {c.code: c for c in (await db.scalars(select(CatType))).all()}
+    chosen = []
+    for index in indices:
+        existing = next((d for d in obs.detections if d.bounding_box.get("review_id") == str(body.review_id)
+                         and d.bounding_box.get("review_index") == index), None)
+        if existing is None:
+            row = rows[index]
+            category = categories.get(code_for_label(row["label"]))
+            if category is None:
+                raise HTTPException(400, "图鉴类别尚未初始化")
+            # A language model suggestion has no detector box; never invent one.
+            existing = Detection(raw_label=row["label"], confidence=row["confidence"], cat_type=category,
+                                 bounding_box={"xyxy": [], "review_id": str(body.review_id), "review_index": index})
+            obs.detections.append(existing)
+        chosen.append(existing)
+    await db.flush()
+    owner.confirmed_detection_ids = sorted(d.id for d in chosen)
+    owner.confirmed = True
+    await db.commit()
+    return observation_dict(obs, owner)
 
 
 @router.get("/observations/{observation_id}/image")

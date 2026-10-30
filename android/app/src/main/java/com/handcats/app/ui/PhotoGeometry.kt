@@ -13,8 +13,12 @@ fun fittedPhotoRect(imageWidth: Float, imageHeight: Float, viewWidth: Float, vie
     return PhotoRect((viewWidth - width) / 2, (viewHeight - height) / 2, width, height)
 }
 
-fun observationTitle(item: Observation): String = when (item.detections.size) {
+fun observationTitle(item: Observation): String {
+    val collected = item.detections.filter { it.confirmed }
+    if (collected.isNotEmpty()) return collected.map { displayName(it.label) }.distinct().joinToString(" · ")
+    return when (item.detections.size) {
     0 -> "一次新的探索"
     1 -> item.detections.first().let { if (it.catCode == null) "遇见一只猫" else displayName(it.label) }
-    else -> "同框相遇 · ${item.detections.size} 个猫咪识别结果"
+    else -> "相遇记录 · ${item.detections.size} 个识别结果"
+    }
 }

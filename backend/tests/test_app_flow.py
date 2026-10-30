@@ -9,7 +9,7 @@ import unittest
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 import httpx
 from PIL import Image
@@ -27,6 +27,8 @@ from app.schemas.detection import DetectCatResponse, DetectionItem
 from app.services.catalog import CATALOG, code_for_label
 from app.services.detection_service import DetectionService
 from app.api.routes.collection import normalize_image
+from app.api.routes.collection import review_service
+from app.schemas.review import ReviewResponse, ReviewSuggestion
 
 
 class ApplicationFlow(unittest.IsolatedAsyncioTestCase):
@@ -90,6 +92,68 @@ class ApplicationFlow(unittest.IsolatedAsyncioTestCase):
         headers={"Authorization":"Bearer "+r.json()["token"]}
         self.assertEqual((await self.client.post("/api/v1/auth/logout", headers=headers)).status_code,204)
         self.assertEqual((await self.client.get("/api/v1/auth/me", headers=headers)).status_code,401)
+
+    async def test_review_can_collect_when_yolo_misses_and_is_private_and_idempotent(self):
+        a = await self.account("review_a")
+        b = await self.account("review_b")
+        with patch.object(service, "detect_cat", return_value=DetectCatResponse(success=True, message="no cat")):
+            uploaded = await self.client.post("/api/v1/observations", headers={**a, "X-Request-ID": str(uuid.uuid4())},
+                files={"file": ("cat.jpg", self.picture, "image/jpeg")})
+        self.assertEqual(uploaded.status_code, 201, uploaded.text)
+        item = uploaded.json()
+        self.assertEqual(item["detections"], [])
+        endpoint = f"/api/v1/observations/{item['id']}"
+        answer = ReviewResponse(success=True, model="deepseek-flash", message="ok", suggestions=[
+            ReviewSuggestion(label="布偶猫", cat_code="ragdoll", confidence=.9),
+            ReviewSuggestion(label="土耳其安哥拉猫", cat_code=None, confidence=.8)])
+        with patch.object(review_service, "review", new=AsyncMock(return_value=answer)) as mocked:
+            self.assertEqual((await self.client.post(endpoint+"/review", headers=b)).status_code,404)
+            self.assertEqual(mocked.await_count,0)
+            reviewed = (await self.client.post(endpoint+"/review", headers=a)).json()
+        body = {"review_id":reviewed["review_id"], "selected_indices":[0]}
+        self.assertEqual((await self.client.post(endpoint+"/review/apply",headers=b,json=body)).status_code,404)
+        self.assertEqual((await self.client.post(endpoint+"/review/apply",headers=a,json={**body,"selected_indices":[1]})).status_code,400)
+        accepted = await self.client.post(endpoint+"/review/apply",headers=a,json=body)
+        self.assertEqual(accepted.status_code,200,accepted.text)
+        d = accepted.json()["detections"][0]
+        self.assertEqual(d["cat_code"],"ragdoll")
+        self.assertEqual(d["source"],"deepseek")
+        self.assertEqual(d["bounding_box"],[])
+        self.assertTrue(d["confirmed"])
+        again = (await self.client.post(endpoint+"/review/apply",headers=a,json=body)).json()
+        self.assertEqual(len(again["detections"]),1)
+        cats=(await self.client.get("/api/v1/catalog",headers=a)).json()
+        self.assertEqual({c["code"] for c in cats if c["collected"]},{"ragdoll"})
+        history=(await self.client.get("/api/v1/observations?cat_code=ragdoll",headers=a)).json()
+        self.assertEqual(history["items"][0]["id"],item["id"])
+        with patch.object(review_service,"review",new=AsyncMock(return_value=answer.model_copy())):
+            await self.client.post(endpoint+"/review",headers=a)
+        self.assertEqual((await self.client.post(endpoint+"/review/apply",headers=a,json=body)).status_code,409)
+
+    async def test_review_correction_replaces_wrong_collection_and_preserves_yolo(self):
+        a = await self.account("correction_a")
+        wrong = DetectCatResponse(success=True,message="ok",detections=[
+            DetectionItem(label="中华田园猫(白)",confidence=.95,bounding_box=[.1,.1,.9,.9])])
+        with patch.object(service,"detect_cat",return_value=wrong):
+            item=(await self.client.post("/api/v1/observations",headers={**a,"X-Request-ID":str(uuid.uuid4())},
+                files={"file":("cat.jpg",self.picture,"image/jpeg")})).json()
+        endpoint=f"/api/v1/observations/{item['id']}"
+        await self.client.patch(endpoint,headers=a,json={"confirmed":True,"note":"保留这段手记","favorite":True})
+        answer=ReviewResponse(success=True,model="deepseek-flash",message="ok",suggestions=[
+            ReviewSuggestion(label="波斯猫",cat_code="persian",confidence=.9),
+            ReviewSuggestion(label="布偶猫",cat_code="ragdoll",confidence=.85)])
+        with patch.object(review_service,"review",new=AsyncMock(return_value=answer)):
+            result=(await self.client.post(endpoint+"/review",headers=a)).json()
+        accepted=(await self.client.post(endpoint+"/review/apply",headers=a,json={
+            "review_id":result["review_id"],"selected_indices":[0,1,1]})).json()
+        self.assertEqual(len(accepted["detections"]),3)
+        original=next(d for d in accepted["detections"] if d["source"]=="yolo")
+        self.assertFalse(original["confirmed"])
+        self.assertEqual(original["bounding_box"],[.1,.1,.9,.9])
+        self.assertEqual(accepted["note"],"保留这段手记")
+        self.assertTrue(accepted["favorite"])
+        cats=(await self.client.get("/api/v1/catalog",headers=a)).json()
+        self.assertEqual({c["code"] for c in cats if c["collected"]},{"persian","ragdoll"})
 
     async def test_collection_ownership_idempotency_and_delete(self):
         a=await self.account("cat_a")
