@@ -9,6 +9,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ApiContractTest {
+    @Test fun visualReviewSupportsCatalogAndOutsideAnimals() {
+        val result=ApiClient.json.decodeFromString<ReviewResponse>("""{"success":true,"model":"deepseek-flash","review_id":"abc","message":"ok","suggestions":[{"label":"布偶猫","cat_code":"ragdoll","confidence":0.9},{"label":"土耳其安哥拉猫","cat_code":null,"confidence":0.8}]}""")
+        assertEquals("ragdoll",result.suggestions[0].catCode)
+        assertNull(result.suggestions[1].catCode)
+        assertEquals("{\"review_id\":\"abc\",\"selected_indices\":[0]}",ApiClient.json.encodeToString(ReviewApply("abc",listOf(0))))
+    }
     @Test fun detectionOverlaysFollowFittedImageRatherThanLetterbox() {
         val wide = fittedPhotoRect(1000f, 500f, 400f, 400f)
         assertEquals(0f, wide.left, .01f); assertEquals(100f, wide.top, .01f)
@@ -21,7 +27,7 @@ class ApiContractTest {
         val item=ApiClient.json.decodeFromString<Observation>("""{"id":"1","created_at":"2026-10-28T10:00:00Z","image_url":"/photo","status":"processed","confirmed":true,"confirmed_detection_ids":[2],"detections":[{"id":1,"label":"中华田园猫(白)","confidence":0.96,"cat_code":"domestic_white","confirmed":false},{"id":2,"label":"中华田园猫(狸花)","confidence":0.93,"cat_code":"domestic_tabby","confirmed":true}]}""")
         assertEquals(listOf(2L), item.confirmedDetectionIds)
         assertFalse(item.detections[0].confirmed); assertTrue(item.detections[1].confirmed)
-        assertTrue(observationTitle(item).contains("2 个"))
+        assertEquals("中华田园猫(狸花)",observationTitle(item))
         assertEquals("{\"confirmed_detection_ids\":[2]}", ApiClient.json.encodeToString(ObservationEdit(confirmedDetectionIds=listOf(2L))))
     }
     @Test fun domesticCatNamesStayConsistentAcrossOldAndNewRecords() {
