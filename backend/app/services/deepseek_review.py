@@ -11,6 +11,7 @@ import httpx
 from app.core.config import settings
 from app.schemas.review import ReviewResponse, ReviewSuggestion
 from app.services.catalog import CATALOG, code_for_label
+from app.services.geometry import valid_box
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,12 @@ class DeepSeekReviewService:
             "若明确属于图鉴外的猫类别或其他动物，请返回其正常中文名称。"
             "不要把所有白色品种猫都当成田园白猫，不要做血统鉴定。"
             "图片中每只动物返回一个 cats，按从左到右、从上到下排列。"
+            "为每只动物独立返回 bounding_box：[左,上,右,下]，坐标相对整张原图归一化到0到1，框住该动物全身。"
+            "不要对同一只动物重复返回；无法可靠定位时 bounding_box 返回空数组，不要猜测或套用其他动物的位置。"
             "没有动物或看不清时返回空数组，不能把无法确定当成新物种。\n"
             f"图鉴类别：{json.dumps(allowed, ensure_ascii=False)}\n"
             f"YOLO 当前结果（仅供参考）：{json.dumps(yolo_labels, ensure_ascii=False)}\n"
-            '只返回 JSON：{"cats":[{"label":"图鉴名称或图鉴外正常鉴定名称","confidence":0.0}],"explanation":"简短说明"}'
+            '只返回 JSON：{"cats":[{"label":"图鉴名称或图鉴外正常鉴定名称","confidence":0.0,"bounding_box":[0.1,0.1,0.4,0.9]}],"explanation":"简短说明"}'
         )
         encoded = base64.b64encode(image).decode("ascii")
         payload = {
@@ -46,7 +49,7 @@ class DeepSeekReviewService:
             "stream": False,
             "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
-            "max_tokens": 1500,
+            "max_tokens": 4000,
         }
         try:
             async with httpx.AsyncClient(timeout=settings.deepseek_timeout_seconds) as client:
@@ -77,7 +80,8 @@ class DeepSeekReviewService:
                         confidence = 0.0
                 except (TypeError, ValueError):
                     confidence = 0.0
-                suggestions.append(ReviewSuggestion(label=canonical, cat_code=code, confidence=confidence))
+                suggestions.append(ReviewSuggestion(label=canonical, cat_code=code, confidence=confidence,
+                                                     bounding_box=valid_box(item.get("bounding_box"))))
             explanation = str(data.get("explanation", "")).strip()[:500]
             return ReviewResponse(success=True, model=settings.deepseek_model, suggestions=suggestions,
                                   explanation=explanation,

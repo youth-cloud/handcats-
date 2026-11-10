@@ -33,6 +33,16 @@ from app.schemas.review import ReviewResponse, ReviewSuggestion
 
 class ApplicationFlow(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.key_patch = patch.object(settings, "deepseek_api_key", "mock-only")
+        self.key_patch.start()
+        # Never send test photos or incur real provider charges, including the
+        # automatic fallback now performed during empty-detection uploads.
+        self.provider_patch = patch.object(review_service,"review",new=AsyncMock(
+            return_value=ReviewResponse(success=False,model="mock",message="unavailable")))
+        self.provider_patch.start()
+        from app.services.work_gate import review_throttle, review_budget, upload_throttle
+        for throttle in (review_throttle, review_budget, upload_throttle):
+            throttle.entries.clear()
         self.schema = "test_handcats_" + uuid.uuid4().hex
         self.conn = await engine.connect()
         await self.conn.execute(text(f'CREATE SCHEMA "{self.schema}"'))
@@ -58,6 +68,8 @@ class ApplicationFlow(unittest.IsolatedAsyncioTestCase):
         self.picture = picture.getvalue()
 
     async def asyncTearDown(self):
+        self.provider_patch.stop()
+        self.key_patch.stop()
         await self.client.aclose()
         settings.upload_dir = self.original_dir
         self.temp.cleanup()
@@ -115,13 +127,13 @@ class ApplicationFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post(endpoint+"/review/apply",headers=a,json={**body,"selected_indices":[1]})).status_code,400)
         accepted = await self.client.post(endpoint+"/review/apply",headers=a,json=body)
         self.assertEqual(accepted.status_code,200,accepted.text)
-        d = accepted.json()["detections"][0]
+        d = next(d for d in accepted.json()["detections"] if d["cat_code"]=="ragdoll")
         self.assertEqual(d["cat_code"],"ragdoll")
         self.assertEqual(d["source"],"deepseek")
         self.assertEqual(d["bounding_box"],[])
         self.assertTrue(d["confirmed"])
         again = (await self.client.post(endpoint+"/review/apply",headers=a,json=body)).json()
-        self.assertEqual(len(again["detections"]),1)
+        self.assertEqual(len(again["detections"]),2)
         cats=(await self.client.get("/api/v1/catalog",headers=a)).json()
         self.assertEqual({c["code"] for c in cats if c["collected"]},{"ragdoll"})
         history=(await self.client.get("/api/v1/observations?cat_code=ragdoll",headers=a)).json()
@@ -146,14 +158,302 @@ class ApplicationFlow(unittest.IsolatedAsyncioTestCase):
             result=(await self.client.post(endpoint+"/review",headers=a)).json()
         accepted=(await self.client.post(endpoint+"/review/apply",headers=a,json={
             "review_id":result["review_id"],"selected_indices":[0,1,1]})).json()
-        self.assertEqual(len(accepted["detections"]),3)
-        original=next(d for d in accepted["detections"] if d["source"]=="yolo")
-        self.assertFalse(original["confirmed"])
-        self.assertEqual(original["bounding_box"],[.1,.1,.9,.9])
+        self.assertEqual(len(accepted["detections"]),2)
+        self.assertTrue(all(d["source"]=="deepseek" for d in accepted["detections"]))
+        archived = (await self.conn.execute(text("SELECT bounding_box, active FROM detections WHERE observation_id=:id AND bounding_box->>'review_id' IS NULL"), {"id":item["id"]})).first()
+        self.assertFalse(archived.active)
+        self.assertEqual(archived.bounding_box["xyxy"],[.1,.1,.9,.9])
         self.assertEqual(accepted["note"],"保留这段手记")
         self.assertTrue(accepted["favorite"])
         cats=(await self.client.get("/api/v1/catalog",headers=a)).json()
         self.assertEqual({c["code"] for c in cats if c["collected"]},{"persian","ragdoll"})
+
+    async def empty_observation(self, headers):
+        with patch.object(service, "detect_cat", return_value=DetectCatResponse(success=True, message="none")):
+            response = await self.client.post("/api/v1/observations", headers={**headers,"X-Request-ID":str(uuid.uuid4())},
+                files={"file":("cat.jpg", self.picture, "image/jpeg")})
+        self.assertEqual(response.status_code,201,response.text)
+        return "/api/v1/observations/" + response.json()["id"]
+
+    def review_answer(self):
+        # Same breed, two distinct animals: never collapse by label.
+        return ReviewResponse(success=True,model="mock",message="ok",suggestions=[
+            ReviewSuggestion(label="布偶猫",cat_code="ragdoll",confidence=.9,bounding_box=[.05,.1,.45,.9]),
+            ReviewSuggestion(label="布偶猫",cat_code="ragdoll",confidence=.8,bounding_box=[.55,.1,.95,.9])])
+
+    async def test_three_reviews_replace_results_and_survive_new_requests(self):
+        a = await self.account("quota_a")
+        endpoint = await self.empty_observation(a)
+        old_ids = []
+        with patch.object(review_service,"review",new=AsyncMock(side_effect=lambda *args: self.review_answer())) as mocked:
+            for attempt in range(1,4):
+                r = await self.client.post(endpoint+"/review",headers=a)
+                self.assertEqual(r.status_code,200,r.text)
+                result = r.json()
+                self.assertEqual(result["review_attempts"],attempt)
+                body={"review_id":result["review_id"],"selected_indices":[0,1,1]}
+                accepted=await self.client.post(endpoint+"/review/apply",headers=a,json=body)
+                self.assertEqual(accepted.status_code,200,accepted.text)
+                data=accepted.json()
+                self.assertEqual(len(data["detections"]),2)
+                self.assertTrue(all(d["confirmed"] for d in data["detections"]))
+                self.assertEqual({tuple(d["bounding_box"]) for d in data["detections"]},
+                                 {(.05,.1,.45,.9),(.55,.1,.95,.9)})
+                again=(await self.client.post(endpoint+"/review/apply",headers=a,json=body)).json()
+                self.assertEqual(data["detections"],again["detections"])
+                if old_ids:
+                    stale=await self.client.patch(endpoint,headers=a,json={"confirmed_detection_ids":old_ids})
+                    self.assertEqual(stale.status_code,400)
+                old_ids=[d["id"] for d in data["detections"]]
+            capped=(await self.client.post(endpoint+"/review",headers=a)).json()
+            self.assertFalse(capped["success"])
+            self.assertEqual(capped["review_attempts"],3)
+            self.assertEqual(mocked.await_count,3)
+        persisted=(await self.client.get(endpoint,headers=a)).json()
+        self.assertEqual(persisted["review_attempts"],3)
+        self.assertEqual(persisted["review_result"]["review_id"],result["review_id"])
+        # Even at quota, existing review remains usable, and an unselected cat
+        # keeps its own box without counting toward the catalog.
+        subset=(await self.client.post(endpoint+"/review/apply",headers=a,json={**body,"selected_indices":[1]})).json()
+        self.assertEqual(len(subset["detections"]),2)
+        self.assertEqual(sum(d["confirmed"] for d in subset["detections"]),1)
+        cats=(await self.client.get("/api/v1/catalog",headers=a)).json()
+        self.assertEqual(next(c["encounters"] for c in cats if c["code"]=="ragdoll"),1)
+
+    async def test_failure_timeout_and_cancellation_release_photo_lease(self):
+        a=await self.account("failure_a")
+        endpoint=await self.empty_observation(a)
+        failure=ReviewResponse(success=False,model="mock",message="failed")
+        with patch.object(review_service,"review",new=AsyncMock(return_value=failure)):
+            self.assertEqual((await self.client.post(endpoint+"/review",headers=a)).json()["review_attempts"],1)
+        with patch.object(review_service,"review",new=AsyncMock(side_effect=TimeoutError)):
+            timeout=(await self.client.post(endpoint+"/review",headers=a)).json()
+            self.assertFalse(timeout["success"])
+            self.assertEqual(timeout["review_attempts"],2)
+        async def cancel(*args):
+            raise asyncio.CancelledError
+        with patch.object(review_service,"review",new=cancel):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.client.post(endpoint+"/review",headers=a)
+        state=(await self.conn.execute(text("SELECT review_attempts, review_request_id, review_busy_until FROM observations WHERE id=:id"),{"id":endpoint.rsplit('/',1)[1]})).first()
+        self.assertEqual(state.review_attempts,3)
+        self.assertIsNone(state.review_request_id)
+        self.assertIsNone(state.review_busy_until)
+
+    async def test_unconfigured_and_full_queue_do_not_consume_quota(self):
+        from app.services.work_gate import review_gate
+        a=await self.account("queue_a")
+        endpoint=await self.empty_observation(a)
+        with patch.object(settings,"deepseek_api_key",""):
+            r=(await self.client.post(endpoint+"/review",headers=a)).json()
+            self.assertEqual(r["review_attempts"],0)
+        with patch.object(review_gate,"pending",review_gate.capacity):
+            self.assertEqual((await self.client.post(endpoint+"/review",headers=a)).status_code,503)
+        self.assertEqual((await self.client.get(endpoint,headers=a)).json()["review_attempts"],0)
+
+    async def test_concurrent_review_apply_and_delete_use_independent_connections(self):
+        # The ordinary fixture uses one connection. Real concurrent HTTP requests
+        # must use independent transactions to exercise PostgreSQL row locks.
+        from sqlalchemy.ext.asyncio import create_async_engine
+        a=await self.account("parallel_a")
+        endpoint=await self.empty_observation(a)
+        concurrent_engine=create_async_engine(settings.database_url,
+            connect_args={"server_settings":{"search_path":self.schema}})
+        factory=async_sessionmaker(concurrent_engine,expire_on_commit=False)
+        async def session():
+            async with factory() as db:
+                yield db
+        self.app.dependency_overrides[get_session]=session
+        started, finish=asyncio.Event(),asyncio.Event()
+        async def delayed(*args):
+            started.set()
+            await finish.wait()
+            return self.review_answer()
+        try:
+            with patch.object(review_service,"review",new=AsyncMock(side_effect=delayed)) as mocked:
+                first=asyncio.create_task(self.client.post(endpoint+"/review",headers=a))
+                await asyncio.wait_for(started.wait(),5)
+                duplicate=await self.client.post(endpoint+"/review",headers=a)
+                self.assertEqual(duplicate.status_code,409,duplicate.text)
+                finish.set()
+                result=(await first).json()
+                self.assertEqual(mocked.await_count,1)
+            body={"review_id":result["review_id"],"selected_indices":[0,1]}
+            applied=await asyncio.gather(*(self.client.post(endpoint+"/review/apply",headers=a,json=body) for _ in range(4)))
+            self.assertTrue(all(r.status_code==200 for r in applied),[r.text for r in applied])
+            self.assertTrue(all(len(r.json()["detections"])==2 for r in applied))
+            self.assertEqual(len({tuple(d["id"] for d in r.json()["detections"]) for r in applied}),1)
+            # Competing callers for the final slot may produce one conflict or
+            # a capped response, but must never start a fourth provider request.
+            with patch.object(review_service,"review",new=AsyncMock(side_effect=lambda *args: self.review_answer())) as mocked:
+                answers=await asyncio.gather(*(self.client.post(endpoint+"/review",headers=a) for _ in range(5)))
+                self.assertLessEqual(mocked.await_count,2)
+                self.assertTrue(all(r.status_code in (200,409,503) for r in answers))
+            self.assertEqual((await self.client.get(endpoint,headers=a)).json()["review_attempts"],3)
+            # Use another photo for the deletion race after exhausting this one.
+            endpoint=await self.empty_observation(a)
+            # Deletion while a paid request is in flight cannot resurrect the photo.
+            started.clear(); finish.clear()
+            with patch.object(review_service,"review",new=delayed):
+                pending=asyncio.create_task(self.client.post(endpoint+"/review",headers=a))
+                await asyncio.wait_for(started.wait(),5)
+                self.assertEqual((await self.client.delete(endpoint,headers=a)).status_code,204)
+                finish.set()
+                self.assertEqual((await pending).status_code,404)
+            self.assertEqual((await self.client.get(endpoint,headers=a)).status_code,404)
+        finally:
+            finish.set()
+            await concurrent_engine.dispose()
+
+    async def test_legacy_polluted_history_migration_is_repeatable(self):
+        import json
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+        from app.db.initialize import initialize_database
+        a=await self.account("migration_a")
+        endpoint=await self.empty_observation(a)
+        oid=endpoint.rsplit('/',1)[1]
+        category=await self.conn.scalar(text("SELECT id FROM cat_types WHERE code='ragdoll'"))
+        ids=[]
+        for batch in range(5):
+            rid=str(uuid.uuid4())
+            for index in range(2):
+                did=await self.conn.scalar(text("""INSERT INTO detections (observation_id,cat_type_id,raw_label,confidence,bounding_box)
+                    VALUES (:oid,:cid,'布偶猫',0.9,CAST(:box AS jsonb)) RETURNING id"""),
+                    {"oid":oid,"cid":category,"box":json.dumps({"xyxy":[],"review_id":rid,"review_index":index})})
+                ids.append(did)
+        await self.conn.execute(text("UPDATE user_observations SET confirmed=true,confirmed_detection_ids=CAST(:ids AS jsonb) WHERE observation_id=:id"),{"ids":json.dumps(ids),"id":oid})
+        await self.conn.commit()
+        # Simulate the old schema. Its real ALTER path must work, not just fresh metadata.
+        for column in ('review_attempts','review_request_id','review_busy_until','review_layout_version','auto_review_attempted'):
+            await self.conn.execute(text(f'ALTER TABLE observations DROP COLUMN {column}'))
+        await self.conn.execute(text('ALTER TABLE detections DROP COLUMN active'))
+        await self.conn.commit()
+        @asynccontextmanager
+        async def begin():
+            async with self.conn.begin():
+                yield self.conn
+        with patch('app.db.initialize.engine',SimpleNamespace(begin=begin)):
+            await initialize_database()
+        cleaned=(await self.client.get(endpoint,headers=a)).json()
+        self.assertEqual(len(cleaned['detections']),2)
+        self.assertEqual(cleaned['review_attempts'],3)
+        self.assertEqual(set(cleaned['confirmed_detection_ids']),set(ids[-2:]))
+        # Restart must never reactivate a cat intentionally unchecked afterwards.
+        await self.client.patch(endpoint,headers=a,json={'confirmed_detection_ids':[ids[-1]]})
+        await self.conn.commit()
+        with patch('app.db.initialize.engine',SimpleNamespace(begin=begin)):
+            await initialize_database()
+        again=(await self.client.get(endpoint,headers=a)).json()
+        self.assertEqual(again['confirmed_detection_ids'],[ids[-1]])
+        self.assertEqual(again['review_attempts'],3)
+        self.assertEqual(len(again['detections']),2)
+
+    async def test_auto_fallback_catalog_is_collectable_and_manual_quota_stays_three(self):
+        a=await self.account("auto_catalog")
+        headers={**a,"X-Request-ID":str(uuid.uuid4())}
+        with patch.object(service,"detect_cat",return_value=DetectCatResponse(success=True,message="none")), \
+                patch.object(review_service,"review",new=AsyncMock(side_effect=lambda *args:self.review_answer())) as mocked:
+            item=(await self.client.post("/api/v1/observations",headers=headers,
+                files={"file":("cat.jpg",self.picture,"image/jpeg")})).json()
+            repeat=(await self.client.post("/api/v1/observations",headers=headers,
+                files={"file":("cat.jpg",self.picture,"image/jpeg")})).json()
+            self.assertEqual(mocked.await_count,1)
+            self.assertEqual(item['id'],repeat['id'])
+        self.assertEqual(item['review_attempts'],0)
+        self.assertEqual(len(item['detections']),2)
+        self.assertTrue(all(d['source']=='automatic' and not d['confirmed'] for d in item['detections']))
+        self.assertTrue(item['review_result']['automatic'])
+        self.assertIsNone(item['applied_review_id'])
+        self.assertFalse(item['confirmed'])
+        endpoint='/api/v1/observations/'+item['id']
+        saved=await self.client.patch(endpoint,headers=a,json={'confirmed_detection_ids':[d['id'] for d in item['detections']]})
+        self.assertTrue(saved.json()['confirmed'])
+        with patch.object(review_service,'review',new=AsyncMock(side_effect=lambda *args:self.review_answer())) as mocked:
+            for count in range(1,4):
+                result=(await self.client.post(endpoint+'/review',headers=a)).json()
+                self.assertEqual(result['review_attempts'],count)
+                self.assertFalse(result['automatic'])
+            self.assertFalse((await self.client.post(endpoint+'/review',headers=a)).json()['success'])
+            self.assertEqual(mocked.await_count,3)
+
+    async def test_auto_outside_species_stays_outside_catalog(self):
+        a=await self.account('auto_outside')
+        answer=ReviewResponse(success=True,model='mock',message='ok',suggestions=[
+            ReviewSuggestion(label='土耳其安哥拉猫',confidence=.9,bounding_box=[.1,.1,.9,.9])])
+        with patch.object(service,'detect_cat',return_value=DetectCatResponse(success=True,message='none')), \
+                patch.object(review_service,'review',new=AsyncMock(return_value=answer)):
+            item=(await self.client.post('/api/v1/observations',headers={**a,'X-Request-ID':str(uuid.uuid4())},
+                files={'file':('cat.jpg',self.picture,'image/jpeg')})).json()
+        self.assertTrue(item['review_result']['automatic'])
+        self.assertIsNone(item['detections'][0]['cat_code'])
+        self.assertEqual(item['detections'][0]['label'],'土耳其安哥拉猫')
+        self.assertEqual(item['review_attempts'],0)
+        r=await self.client.patch('/api/v1/observations/'+item['id'],headers=a,json={'confirmed':True})
+        self.assertEqual(r.status_code,400)
+        self.assertFalse(any(c['collected'] for c in (await self.client.get('/api/v1/catalog',headers=a)).json()))
+
+    async def test_auto_timeout_and_empty_answer_preserve_saved_photo_and_quota(self):
+        a=await self.account('auto_empty')
+        with patch.object(review_service,'review',new=AsyncMock(side_effect=TimeoutError)) as mocked:
+            endpoint=await self.empty_observation(a)
+            self.assertEqual(mocked.await_count,1)
+        item=(await self.client.get(endpoint,headers=a)).json()
+        self.assertEqual(item['detections'],[])
+        self.assertEqual(item['review_attempts'],0)
+        with patch.object(review_service,'review',new=AsyncMock(return_value=ReviewResponse(success=True,model='mock',message='none'))) as mocked:
+            endpoint=await self.empty_observation(a)
+            self.assertEqual(mocked.await_count,1)
+        item=(await self.client.get(endpoint,headers=a)).json()
+        self.assertEqual(item['detections'],[])
+        self.assertEqual(item['review_attempts'],0)
+        state=(await self.conn.execute(text('SELECT auto_review_attempted,review_busy_until FROM observations WHERE id=:id'),{'id':item['id']})).first()
+        self.assertTrue(state.auto_review_attempted)
+        self.assertIsNone(state.review_busy_until)
+
+    async def test_auto_does_not_run_when_yolo_found_target(self):
+        a=await self.account('auto_noop')
+        with patch.object(service,'detect_cat',return_value=DetectCatResponse(success=True,message='ok',detections=[
+                DetectionItem(label='cat',confidence=.8)])), patch.object(review_service,'review',new=AsyncMock()) as mocked:
+            response=await self.client.post('/api/v1/observations',headers={**a,'X-Request-ID':str(uuid.uuid4())},
+                files={'file':('cat.jpg',self.picture,'image/jpeg')})
+        self.assertEqual(response.status_code,201,response.text)
+        self.assertEqual(mocked.await_count,0)
+
+    async def test_auto_retry_concurrency_does_not_duplicate_provider_call(self):
+        from sqlalchemy.ext.asyncio import create_async_engine
+        a=await self.account('auto_race')
+        concurrent_engine=create_async_engine(settings.database_url,
+            connect_args={'server_settings':{'search_path':self.schema}})
+        factory=async_sessionmaker(concurrent_engine,expire_on_commit=False)
+        async def session():
+            async with factory() as db:
+                yield db
+        self.app.dependency_overrides[get_session]=session
+        started,finish=asyncio.Event(),asyncio.Event()
+        async def delayed(*args):
+            started.set();await finish.wait();return self.review_answer()
+        headers={**a,'X-Request-ID':str(uuid.uuid4())}
+        async def upload():
+            return await self.client.post('/api/v1/observations',headers=headers,
+                files={'file':('cat.jpg',self.picture,'image/jpeg')})
+        try:
+            with patch.object(service,'detect_cat',return_value=DetectCatResponse(success=True,message='none')), \
+                    patch.object(review_service,'review',new=AsyncMock(side_effect=delayed)) as mocked:
+                first=asyncio.create_task(upload())
+                await asyncio.wait_for(started.wait(),5)
+                retry=await upload()
+                self.assertEqual(retry.status_code,201,retry.text)
+                finish.set()
+                completed=await first
+                self.assertEqual(completed.status_code,201,completed.text)
+                self.assertEqual(completed.json()['id'],retry.json()['id'])
+                self.assertEqual(mocked.await_count,1)
+                self.assertEqual(completed.json()['review_attempts'],0)
+                self.assertEqual(len(completed.json()['detections']),2)
+        finally:
+            finish.set()
+            await concurrent_engine.dispose()
 
     async def test_collection_ownership_idempotency_and_delete(self):
         a=await self.account("cat_a")

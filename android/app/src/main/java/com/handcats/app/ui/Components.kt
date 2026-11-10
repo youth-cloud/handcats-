@@ -156,7 +156,7 @@ enum class Symbol { Home, Book, Camera, History, Person, Back, Arrow, Heart, Set
 }
 
 @Composable fun Paper(modifier: Modifier = Modifier, color: Color = Color.White, content: @Composable ColumnScope.() -> Unit) {
-    Column(modifier.fillMaxWidth().background(color).padding(horizontal=16.dp,vertical=20.dp), content = content)
+    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(color).padding(horizontal=16.dp,vertical=20.dp), content = content)
 }
 
 @Composable fun EmptyState(title: String, description: String, button: String? = null, onClick: () -> Unit = {}) {
@@ -172,16 +172,17 @@ enum class Symbol { Home, Book, Camera, History, Person, Back, Arrow, Heart, Set
                             detections: List<DetectionItem> = emptyList(), focusedIndex: Int? = null) {
     var retry by remember(path) { mutableIntStateOf(0) }
     var failed by remember(path, retry) { mutableStateOf(false) }
-    val bitmap by produceState<Bitmap?>(null, path, vm.user?.id, retry) {
-        try { value = vm.image(path); failed = value == null }
+    val preview = contentScale != ContentScale.Fit
+    val bitmap by produceState<Bitmap?>(null, path, vm.user?.id, preview, retry) {
+        try { value = vm.image(path, preview); failed = value == null }
         catch (e: CancellationException) { throw e } catch (_: Exception) { failed = true }
     }
     Box(modifier.background(Mint), contentAlignment=Alignment.Center) {
         bitmap?.let { photo ->
             Image(photo.asImageBitmap(), "相遇照片", Modifier.fillMaxSize(), contentScale = contentScale)
-            if (detections.isNotEmpty() && contentScale == ContentScale.Fit) Canvas(Modifier.fillMaxSize().semantics{contentDescription="猫咪编号与识别框"}) {
+            if (detections.size > 1 && contentScale == ContentScale.Fit) Canvas(Modifier.fillMaxSize().semantics{contentDescription="猫咪编号与识别框"}) {
                 val fitted = fittedPhotoRect(photo.width.toFloat(), photo.height.toFloat(), size.width, size.height)
-                detections.forEachIndexed { index, detection ->
+                localizedDetections(detections).forEach { (index, detection) ->
                     val b = detection.boundingBox
                     if (b.size == 4 && b.all { it.isFinite() } && b[2] > b[0] && b[3] > b[1]) {
                         val left = fitted.left + b[0].coerceIn(0f, 1f) * fitted.width

@@ -15,7 +15,7 @@ class DeepSeekReviewTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(data["response_format"], {"type": "json_object"})
             self.assertEqual(data["messages"][0]["content"][1]["image_url"]["url"], "data:image/jpeg;base64,cGhvdG8=")
             return httpx.Response(200, json={"choices":[{"message":{"content":json.dumps({
-                "cats":[{"label":"Ragdoll","confidence":.9},{"label":"土耳其安哥拉猫","confidence":.8}],
+                "cats":[{"label":"Ragdoll","confidence":.9,"bounding_box":[.05,.1,.45,.9]},{"label":"土耳其安哥拉猫","confidence":.8,"bounding_box":[.55,.1,.95,.9]}],
                 "explanation":"外观参考"})}}]})
         client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
         with patch.object(settings,"deepseek_api_key","test-key"), patch("app.services.deepseek_review.httpx.AsyncClient",return_value=client):
@@ -25,6 +25,14 @@ class DeepSeekReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.suggestions[0].cat_code,"ragdoll")
         self.assertEqual(result.suggestions[1].label,"土耳其安哥拉猫")
         self.assertIsNone(result.suggestions[1].cat_code)
+        self.assertEqual(result.suggestions[0].bounding_box,[.05,.1,.45,.9])
+        self.assertEqual(result.suggestions[1].bounding_box,[.55,.1,.95,.9])
+
+    def test_unreliable_boxes_are_not_drawn(self):
+        from app.services.geometry import valid_box
+        for value in (None, [], [0,0,0,1], [-1,0,1,1], [0,0,100,100],
+                      [0,0,float('nan'),1], ['0',0,1,1], [False,0,1,1]):
+            self.assertEqual(valid_box(value),[])
 
     async def test_invalid_structure_returns_failure(self):
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200,json={

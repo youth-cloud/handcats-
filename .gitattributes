@@ -1,4 +1,6 @@
 * text=auto
+.gitignore text eol=lf
+.gitattributes text eol=lf
 *.kt text eol=lf
 *.kts text eol=lf
 *.py text eol=lf

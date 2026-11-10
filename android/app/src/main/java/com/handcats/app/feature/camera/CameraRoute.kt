@@ -43,6 +43,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -98,6 +99,7 @@ private fun opticalScale(info: CameraInfo): Float? = runCatching {
     val lifecycleOwner=LocalLifecycleOwner.current
     var permission by remember {mutableStateOf(ContextCompat.checkSelfPermission(context,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)}
     var cameraError by remember {mutableStateOf<String?>(null)}
+    var flashError by remember { mutableStateOf<String?>(null) }
     var taking by remember {mutableStateOf(false)}
     var imageCapture by remember {mutableStateOf<ImageCapture?>(null)}
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
@@ -110,7 +112,9 @@ private fun opticalScale(info: CameraInfo): Float? = runCatching {
     var showZoom by remember { mutableStateOf(false) }
     var zoomInteraction by remember { mutableIntStateOf(0) }
     var zoomTouching by remember { mutableStateOf(false) }
-    var grid by remember { mutableStateOf(false) }
+    var grid by rememberSaveable { mutableStateOf(false) }
+    var flash by rememberSaveable { mutableStateOf(CameraFlash.OFF) }
+    var flashMenu by remember { mutableStateOf(false) }
     var zoomRatio by remember { mutableFloatStateOf(1f) }
     var minZoom by remember { mutableFloatStateOf(1f) }
     var maxZoom by remember { mutableFloatStateOf(1f) }
@@ -244,7 +248,51 @@ private fun opticalScale(info: CameraInfo): Float? = runCatching {
                 } else cameraError="相机暂不可用，请切换前后摄或从相册选图。"
             }
         },executor)
-        onDispose{disposed=true;imageCapture=null;boundCamera=null;provider?.unbindAll()}
+        onDispose{disposed=true;boundCamera?.cameraControl?.enableTorch(false);imageCapture=null;boundCamera=null;provider?.unbindAll()}
+    }
+    val hasFlash=boundCamera?.cameraInfo?.hasFlashUnit()==true
+    DisposableEffect(lifecycleOwner,boundCamera,imageCapture,flash) {
+        val camera=boundCamera
+        val supported=camera?.cameraInfo?.hasFlashUnit()==true
+        imageCapture?.flashMode=flash.captureMode(supported)
+        flashError=null
+        val requests=FlashRequestTracker()
+        var applied=false
+        fun applyWhenReady() {
+            if(camera==null || !supported || applied ||
+                !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) ||
+                camera.cameraInfo.cameraState.value?.type!=CameraState.Type.OPEN) return
+            applied=true
+            val request=requests.begin()
+            val torch=camera.cameraControl.enableTorch(flash.torchEnabled(supported))
+            torch.addListener({
+                val failure=try { torch.get();null } catch(e:Exception) { e }
+                when(requests.complete(request,failure)) {
+                    true -> flashError=null
+                    false -> flashError="此镜头暂时无法切换补光，请重试或关闭闪光灯。"
+                    null -> Unit
+                }
+            },ContextCompat.getMainExecutor(context))
+        }
+        val stateObserver=Observer<CameraState> { state ->
+            if(state.type==CameraState.Type.OPEN) applyWhenReady()
+            else { applied=false;requests.invalidate() }
+        }
+        val observer=LifecycleEventObserver {_,event->
+            if(event==Lifecycle.Event.ON_PAUSE) {
+                requests.invalidate();applied=false
+                if(supported)camera?.cameraControl?.enableTorch(false)
+            }
+            if(event==Lifecycle.Event.ON_RESUME)applyWhenReady()
+        }
+        camera?.cameraInfo?.cameraState?.observe(lifecycleOwner,stateObserver)
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            requests.invalidate()
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            camera?.cameraInfo?.cameraState?.removeObserver(stateObserver)
+            if(supported)camera?.cameraControl?.enableTorch(false)
+        }
     }
     DisposableEffect(boundCamera,lifecycleOwner) {
         val source = boundCamera?.cameraInfo?.zoomState
@@ -366,11 +414,30 @@ private fun opticalScale(info: CameraInfo): Float? = runCatching {
                     }
                 }
             }
+            Box {
+                IconButton(onClick={flashMenu=true},enabled=!taking&&!vm.busy&&boundCamera!=null,
+                    modifier=Modifier.semantics{contentDescription=if(hasFlash)"闪光灯：${flash.label}" else "此镜头无闪光灯"}) {
+                    FlashIcon(if(hasFlash)flash else CameraFlash.OFF,if(hasFlash&&flash!=CameraFlash.OFF)accent else Color.White.copy(alpha=if(hasFlash)1f else .45f))
+                }
+                DropdownMenu(expanded=flashMenu,onDismissRequest={flashMenu=false},shape=RoundedCornerShape(20.dp),containerColor=Color(0xFF222522)) {
+                    CameraFlash.entries.forEach { mode ->
+                        DropdownMenuItem(
+                            text={Text(mode.label,color=if(hasFlash&&flash==mode)accent else Color.White)},
+                            leadingIcon={FlashIcon(mode,Color.White)},
+                            trailingIcon={if((hasFlash&&flash==mode)||(!hasFlash&&mode==CameraFlash.OFF))Glyph(Symbol.Check,color=accent)},
+                            enabled=hasFlash||mode==CameraFlash.OFF,
+                            onClick={flash=mode;flashMenu=false}
+                        )
+                    }
+                    if(!hasFlash)Text("此镜头不支持闪光灯",color=Color.LightGray,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(16.dp))
+                }
+            }
         }
         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(
             androidx.compose.ui.graphics.Brush.verticalGradient(listOf(Color.Transparent,Color.Black.copy(alpha=.65f)))
         ).padding(top=24.dp,bottom=20.dp),horizontalAlignment=Alignment.CenterHorizontally) {
             cameraError?.let { Text(it,color=Color.White,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(horizontal=24.dp,vertical=8.dp)) }
+            flashError?.let { Text(it,color=Color.White,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(horizontal=24.dp,vertical=8.dp)) }
             AnimatedVisibility(visible=showZoom && overallMax>overallMin,enter=fadeIn(),exit=fadeOut()) {
                 Row(Modifier.padding(horizontal=28.dp).clip(RoundedCornerShape(28.dp)).background(Color.Black.copy(alpha=.45f)).padding(horizontal=16.dp),verticalAlignment=Alignment.CenterVertically) {
                     Text("${zoomLabel(zoomRatio)}×",color=accent,modifier=Modifier.width(52.dp),style=MaterialTheme.typography.labelLarge)
@@ -429,6 +496,22 @@ private fun opticalScale(info: CameraInfo): Float? = runCatching {
                 }
             }
         }
+    }
+}
+
+@Composable private fun FlashIcon(mode: CameraFlash,color: Color) {
+    Box(Modifier.size(26.dp),contentAlignment=Alignment.Center) {
+        Canvas(Modifier.size(22.dp)) {
+            val bolt=androidx.compose.ui.graphics.Path().apply {
+                moveTo(size.width*.6f,0f);lineTo(size.width*.16f,size.height*.56f)
+                lineTo(size.width*.49f,size.height*.56f);lineTo(size.width*.38f,size.height)
+                lineTo(size.width*.86f,size.height*.39f);lineTo(size.width*.54f,size.height*.39f);close()
+            }
+            drawPath(bolt,color,style=Stroke(1.5.dp.toPx()))
+            if(mode==CameraFlash.OFF)drawLine(color,Offset(0f,0f),Offset(size.width,size.height),1.5.dp.toPx())
+        }
+        if(mode==CameraFlash.AUTO||mode==CameraFlash.TORCH)Text(if(mode==CameraFlash.AUTO)"A" else "●",color=color,
+            style=MaterialTheme.typography.labelSmall,modifier=Modifier.align(Alignment.BottomEnd).background(Color.Black))
     }
 }
 

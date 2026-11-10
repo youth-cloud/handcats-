@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import com.handcats.app.data.remote.ApiClient
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -12,9 +13,18 @@ import javax.crypto.spec.GCMParameterSpec
 
 class SessionStore(context: Context) {
     private val prefs = context.getSharedPreferences("handcats_session", Context.MODE_PRIVATE)
-    var server: String
-        get() = prefs.getString("server", "http://10.0.2.2:8000/")!!
-        set(value) { prefs.edit().putString("server", value).apply() }
+    val server: String = "https://api.youthd.cn/"
+    init {
+        val previousServer = prefs.getString("server", null)
+        val sameServer = previousServer != null && runCatching {
+            ApiClient.normalize(previousServer) == server
+        }.getOrDefault(false)
+        // Keep cloud sessions on upgrade; never send a former server's token to the cloud.
+        prefs.edit().apply {
+            if (!sameServer) remove("session")
+            putString("server", server)
+        }.apply()
+    }
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey("handcats_token", null) as? SecretKey)?.let { return it }

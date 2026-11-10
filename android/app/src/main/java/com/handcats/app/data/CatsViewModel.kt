@@ -21,17 +21,25 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import retrofit2.HttpException
 import java.io.File
 import java.io.IOException
+import java.io.ByteArrayOutputStream
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import javax.net.ssl.SSLException
 import java.util.UUID
+import android.os.SystemClock
 
 class CatsViewModel(application: Application) : AndroidViewModel(application) {
+    private data class CategoryCache(val items: List<Observation>, val total: Int, val fetchedAt: Long)
+    private val cacheTtlMs = 60_000L
+    private val categoryCache = mutableMapOf<String, CategoryCache>()
+    private var dataCacheToken: String? = null
+    private var dataLoadedAt = 0L
+    private val photoCache = PhotoCache(File(application.cacheDir, "encounter-photos"), viewModelScope)
     private val store = SessionStore(application)
     private var token: String? = store.readToken()
-    var server by mutableStateOf(store.server); private set
-    private var client = ApiClient.client { token }
-    private var api = ApiClient.create(server, client)
+    val server = store.server
+    private val client = ApiClient.client { token }
+    private val api = ApiClient.create(server, client)
     var user by mutableStateOf<User?>(null); private set
     var starting by mutableStateOf(true); private set
     var busy by mutableStateOf(false); private set
@@ -67,21 +75,16 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
                 runCatching { ApiClient.json.parseToJsonElement(e.response()?.errorBody()?.string() ?: "").jsonObject["detail"]?.jsonPrimitive?.content }.getOrNull()
                     ?: when (e.code()) { 503 -> "服务暂时不可用，请稍后重试"; 401 -> "请重新登录"; else -> "请求未完成（${e.code()}），请重试" }
             }
-            is SocketTimeoutException -> "连接超时，请确认服务正在运行，手机与电脑连接同一 Wi-Fi"
-            is SSLException -> "安全连接失败，请检查服务器的 HTTPS 证书"
-            is IOException -> when {
-                e.message?.contains("cleartext", ignoreCase=true) == true -> "当前安装版本不允许 HTTP，请使用调试版或配置 HTTPS 服务地址"
-                android.os.Build.VERSION.SDK_INT >= 37 && ApiClient.isLocalServer(server) &&
-                    androidx.core.content.ContextCompat.checkSelfPermission(getApplication(), android.Manifest.permission.ACCESS_LOCAL_NETWORK) != android.content.pm.PackageManager.PERMISSION_GRANTED -> "缺少本地网络权限，请进入连接设置重新测试，并允许访问本地网络"
-                e is ConnectException -> "无法连接服务，请确认后端已启动，并检查地址、端口及本地网络权限"
-                else -> "网络连接失败，请检查网络、服务地址及应用联网权限后重试"
-            }
+            is SocketTimeoutException -> "连接超时，请稍后重试"
+            is SSLException -> "安全连接失败，请稍后重试；若持续出现，请联系管理员"
+            is ConnectException -> "暂时无法连接拾猫服务，请稍后重试"
+            is IOException -> "网络连接失败，请检查网络及应用联网权限后重试"
             is IllegalArgumentException -> e.message ?: "请检查输入内容"
             else -> "操作未完成，请稍后重试"
         }
     }
     private fun action(onSuccess: (() -> Unit)? = null, block: suspend () -> Unit) {
-        if (busy) return
+        if (busy || refreshing) return
         busy = true; clearMessage()
         viewModelScope.launch {
             var succeeded = false
@@ -104,19 +107,24 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
         store.saveToken(response.token); token = response.token; user = response.user
         loadData()
     }
-    private suspend fun loadData() {
+    private suspend fun loadData(force: Boolean = false) {
         val sessionToken = token
+        if (!force && dataCacheToken == sessionToken && dataLoadedAt > 0L &&
+            SystemClock.elapsedRealtime() - dataLoadedAt < cacheTtlMs) return
         coroutineScope {
             val c = async { api.catalog() }; val o = async { api.observations() }
             val newCats = c.await(); val page = o.await()
-            if (token == sessionToken) { cats = newCats; observations = page.items; total = page.total }
+            if (token == sessionToken) {
+                cats = newCats; observations = page.items; total = page.total
+                dataCacheToken = sessionToken; dataLoadedAt = SystemClock.elapsedRealtime()
+            }
         }
     }
     fun refresh() {
         if (refreshing || busy) return
         refreshing = true; clearMessage()
         viewModelScope.launch {
-            try { loadData() } catch (e: CancellationException) { throw e } catch (e: Exception) { report(e) }
+            try { invalidateCategories(); loadData(force = true) } catch (e: CancellationException) { throw e } catch (e: Exception) { report(e) }
             finally { refreshing = false }
         }
     }
@@ -124,11 +132,18 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
         val page = api.observations(observations.size)
         observations = (observations + page.items).distinctBy { it.id }; total = page.total
     }
-    fun loadCategory(code: String, more: Boolean = false) {
+    fun loadCategory(code: String, more: Boolean = false, force: Boolean = false) {
+        if (categoryLoading && categoryCode == code && !force) return
         if (more && (categoryLoading || categoryCode != code || categoryObservations.size >= categoryTotal)) return
         categoryJob?.cancel()
         val request = ++categoryRequest
         val sessionToken = token
+        val cached = categoryCache[code]
+        if (!more && !force && cached != null && SystemClock.elapsedRealtime() - cached.fetchedAt < cacheTtlMs) {
+            categoryCode = code; categoryObservations = cached.items; categoryTotal = cached.total
+            categoryLoading = false; categoryFailed = false
+            return
+        }
         if (!more) { categoryObservations = emptyList(); categoryTotal = 0 }
         categoryCode = code; categoryLoading = true; categoryFailed = false
         val offset = if (more) categoryObservations.size else 0
@@ -138,33 +153,76 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
                 if (request == categoryRequest && sessionToken == token) {
                     categoryObservations = (if (more) categoryObservations + page.items else page.items).distinctBy { it.id }
                     categoryTotal = page.total
+                    categoryCache[code] = CategoryCache(categoryObservations, categoryTotal,
+                        if (more) cached?.fetchedAt ?: SystemClock.elapsedRealtime() else SystemClock.elapsedRealtime())
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (request == categoryRequest && sessionToken == token) { report(e); categoryFailed = true } }
             finally { if (request == categoryRequest) categoryLoading = false }
         }
     }
-    fun select(item: Observation?) { selected = item; review = null; reviewObservationId = null }
+    fun select(item: Observation?) {
+        selected = item
+        review = item?.let { pendingReview(it, null) }; reviewObservationId = item?.id
+    }
+    private fun updateObservation(result: Observation) {
+        categoryRequest++; categoryJob?.cancel(); categoryLoading = false
+        if (selected?.id == result.id) selected = result
+        observations = observations.map { if (it.id == result.id) result else it }
+        categoryObservations = categoryObservations.map { if (it.id == result.id) result else it }
+        categoryCache.replaceAll { _, cached ->
+            cached.copy(items = cached.items.map { if (it.id == result.id) result else it })
+        }
+    }
+    private fun invalidateCategories() {
+        categoryRequest++; categoryJob?.cancel(); categoryLoading = false
+        categoryCache.clear()
+    }
     fun requestReview(item: Observation) = action {
+        if ((selected?.takeIf { it.id == item.id } ?: item).let { it.reviewAttempts >= it.reviewLimit }) {
+            notice = "这张照片已达到智能复核上限"; return@action
+        }
         review = null; reviewObservationId = null; reviewing = true
         val sessionToken = token
         try {
             val result = api.review(item.id)
             if (selected?.id == item.id && token == sessionToken) {
+                updateObservation((selected ?: item).copy(reviewAttempts = result.reviewAttempts,
+                    reviewLimit = result.reviewLimit, reviewResult = if (result.success) result else item.reviewResult))
                 review = result; reviewObservationId = item.id
             }
-        } finally { reviewing = false }
+        } finally {
+            reviewing = false
+            // One detail refresh after a paid request also reconciles timeouts and
+            // quota consumed by another device. Lists continue to use their cache.
+            if (token == sessionToken) try {
+                val latest = api.observation(item.id)
+                if (token == sessionToken) updateObservation(latest)
+            } catch (e: CancellationException) { throw e } catch (_: Exception) { }
+        }
     }
     fun applyReview(item: Observation, result: ReviewResponse, indices: List<Int>) = action {
         val resultId = result.reviewId ?: return@action
-        val updated = api.applyReview(item.id, ReviewApply(resultId, indices))
-        selected = updated
-        observations = observations.map { if (it.id == updated.id) updated else it }
-        // Accepted review may change the category in which this record belongs.
-        cats = api.catalog()
-        categoryCode?.let { loadCategory(it) }
+        val updated = try {
+            api.applyReview(item.id, ReviewApply(resultId, indices))
+        } catch (e: HttpException) {
+            if (e.code() == 409) {
+                val latest = api.observation(item.id)
+                updateObservation(latest)
+                if (selected?.id == item.id) {
+                    review = pendingReview(latest, null)
+                    reviewObservationId = item.id
+                }
+            }
+            throw e
+        }
+        updateObservation(updated)
         review = null; reviewObservationId = null
-        notice = "已采用复核结果并收进图鉴，原识别结果保留在手记中"
+        // Accepted review may change the category in which this record belongs.
+        invalidateCategories()
+        cats = api.catalog()
+        categoryCode?.let { loadCategory(it, force = true) }
+        notice = "已采用复核结果并收进图鉴"
     }
     fun choosePhoto(file: File) { pendingPhoto?.takeIf { it != file }?.delete(); pendingPhoto = file; requestId = UUID.randomUUID().toString(); photoRevision++; clearMessage() }
     fun discardPhoto() { pendingPhoto?.delete(); pendingPhoto = null; clearMessage() }
@@ -196,46 +254,56 @@ class CatsViewModel(application: Application) : AndroidViewModel(application) {
         select(result); discardPhoto()
         val existed = observations.any { it.id == result.id }
         observations = listOf(result) + observations.filterNot { it.id == result.id }; if (!existed) total++
+        invalidateCategories()
         onSuccess()
     }
     fun edit(item: Observation, change: ObservationEdit) = action {
         val result = api.edit(item.id, change)
-        selected = result; observations = observations.map { if (it.id == result.id) result else it }
-        categoryObservations = categoryObservations.map { if (it.id == result.id) result else it }
-        cats = api.catalog(); notice = when {
-            change.confirmedDetectionIds?.isNotEmpty() == true -> "已保存所选猫咪的图鉴收集"
-            change.confirmedDetectionIds != null || change.confirmed == false -> "已撤销本次收集"
-            change.confirmed == true -> "已收进图鉴，留住这次相遇"
-            else -> "已保存"
-        }
+        updateObservation(result)
+        if (change.favorite == null) notice = observationEditNotice(change)
+        // Favorites and notes do not change catalog counts or category membership.
+        if (change.confirmed != null || change.confirmedDetectionIds != null) cats = api.catalog()
     }
     fun delete(item: Observation, done: () -> Unit) = action(onSuccess = done) {
         api.delete(item.id); observations = observations.filterNot { it.id == item.id }; total = (total - 1).coerceAtLeast(0)
         categoryObservations = categoryObservations.filterNot { it.id == item.id }
-        selected = null; cats = api.catalog()
+        selected = null; invalidateCategories()
+        token?.let { photoCache.remove(it, item.imageUrl) }
+        // Photo deletion has already succeeded. A failed catalog refresh must
+        // not strand the user on an empty detail page or invite another delete.
+        try { cats = api.catalog() }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) { report(e) }
     }
     fun nickname(value: String, done: () -> Unit) = action { user = api.nickname(Nickname(value.trim())); notice = "昵称已更新"; done() }
     fun password(old: String, new: String, done: () -> Unit) = action { api.password(PasswordChange(old, new)); clearSession(); notice = "密码已修改，请重新登录"; done() }
     private fun clearSession() {
         categoryRequest++; categoryJob?.cancel(); categoryCode = null; categoryObservations = emptyList()
         categoryTotal = 0; categoryLoading = false; categoryFailed = false
-        store.clear(); token = null; user = null; cats = emptyList(); observations = emptyList(); total = 0; selected = null; review = null; reviewObservationId = null; discardPhoto()
+        store.clear(); token = null; user = null; cats = emptyList(); observations = emptyList(); total = 0; selected = null; review = null; reviewObservationId = null
+        categoryCache.clear(); dataCacheToken = null; dataLoadedAt = 0L; photoCache.clearMemory(); discardPhoto()
     }
     fun logout(done: () -> Unit) = action { api.logout(); clearSession(); done() }
     fun deleteAccount(password: String, done: () -> Unit) = action { api.deleteAccount(AccountRemoval(password)); clearSession(); notice = "账号及相遇数据已删除"; done() }
     fun forgetLocalSession() { clearSession(); error = null }
-    fun server(value: String, done: () -> Unit) = action {
-        val normalized = ApiClient.normalize(value)
-        val probe = ApiClient.create(normalized, ApiClient.client { null })
-        require(probe.health().status == "ok") { "服务器尚未准备好" }
-        if (normalized != server) { clearSession(); server = normalized; store.server = normalized; client = ApiClient.client { token }; api = ApiClient.create(server, client) }
-        notice = "连接正常，服务地址已保存"; done()
-    }
-    suspend fun image(path: String): Bitmap? = withContext(Dispatchers.IO) {
-        val url = server.trimEnd('/') + path
-        client.newCall(Request.Builder().url(url).build()).execute().use { response ->
-            if (!response.isSuccessful) return@withContext null
-            response.body?.byteStream()?.use { BitmapFactory.decodeStream(it) }
+    suspend fun image(path: String, preview: Boolean = false): Bitmap? {
+        val session = token ?: return null
+        return photoCache.get(session, path, preview) {
+            val url = server.trimEnd('/') + path
+            client.newCall(Request.Builder().url(url).header("Authorization", "Bearer $session").build()).execute().use { response ->
+                if (!response.isSuccessful) return@use null
+                response.body.byteStream().use { stream ->
+                    val output = ByteArrayOutputStream()
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val count = stream.read(buffer)
+                        if (count < 0) break
+                        if (output.size() + count > 12 * 1024 * 1024) throw IOException("Photo too large")
+                        output.write(buffer, 0, count)
+                    }
+                    output.toByteArray()
+                }
+            }
         }
     }
 }

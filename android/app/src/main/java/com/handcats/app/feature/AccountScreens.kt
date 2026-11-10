@@ -1,13 +1,5 @@
 package com.handcats.app.feature
 
-import android.Manifest
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -20,27 +12,25 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.handcats.app.data.CatsViewModel
-import com.handcats.app.data.remote.ApiClient
-import androidx.core.content.ContextCompat
+import com.handcats.app.BuildConfig
 import com.handcats.app.ui.*
 import com.handcats.app.ui.theme.*
 
 @Composable fun PasswordField(value: String, label: String, onChange: (String) -> Unit, enabled: Boolean = true) {
     var visible by remember { mutableStateOf(false) }
     OutlinedTextField(value, onChange, label={ Text(label) }, singleLine=true, enabled=enabled,
-        modifier=Modifier.fillMaxWidth(), shape=RoundedCornerShape(16.dp),
+        modifier=Modifier.fillMaxWidth().keepVisibleAboveKeyboard(), shape=RoundedCornerShape(16.dp),
         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),
         visualTransformation=if(visible) VisualTransformation.None else PasswordVisualTransformation(),
         trailingIcon={ TextButton(onClick={ visible=!visible }) { Text(if(visible) "隐藏" else "显示", style=MaterialTheme.typography.bodySmall) } })
 }
 
-@Composable fun AuthScreen(vm: CatsViewModel, settings: () -> Unit, privacy: () -> Unit) {
+@Composable fun AuthScreen(vm: CatsViewModel, privacy: () -> Unit) {
     var register by rememberSaveable { mutableStateOf(false) }
     var username by rememberSaveable { mutableStateOf("") }
     var nickname by rememberSaveable { mutableStateOf("") }
@@ -51,7 +41,6 @@ import com.handcats.app.ui.theme.*
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal=28.dp), verticalArrangement=Arrangement.spacedBy(12.dp)) {
         Row(Modifier.fillMaxWidth().padding(top=12.dp), horizontalArrangement=Arrangement.SpaceBetween, verticalAlignment=Alignment.CenterVertically) {
             Text("拾猫", color=Forest, style=MaterialTheme.typography.labelLarge)
-            TextButton(onClick=settings, enabled=!vm.busy) { Text("连接设置") }
         }
         CatArt(modifier=Modifier.size(120.dp).align(Alignment.CenterHorizontally))
         Text(if(register) "开始你的拾猫故事" else "记住每一次相遇", style=MaterialTheme.typography.headlineSmall)
@@ -60,8 +49,8 @@ import com.handcats.app.ui.theme.*
             FilterChip(!register, { register=false; localError=null }, label={Text("登录")}, enabled=!vm.busy)
             FilterChip(register, { register=true; localError=null }, label={Text("创建账号")}, enabled=!vm.busy)
         }
-        if(register) OutlinedTextField(nickname,{ nickname=it.take(30) },label={Text("怎么称呼你")},singleLine=true,modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),enabled=!vm.busy)
-        OutlinedTextField(username,{ username=it.take(32) },label={Text("账号")},supportingText={Text("3–32 位字母、数字或下划线")},singleLine=true,modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),enabled=!vm.busy,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Ascii))
+        if(register) OutlinedTextField(nickname,{ nickname=it.take(30) },label={Text("怎么称呼你")},singleLine=true,modifier=Modifier.fillMaxWidth().keepVisibleAboveKeyboard(),shape=RoundedCornerShape(16.dp),enabled=!vm.busy)
+        OutlinedTextField(username,{ username=it.take(32) },label={Text("账号")},supportingText={Text("3–32 位字母、数字或下划线")},singleLine=true,modifier=Modifier.fillMaxWidth().keepVisibleAboveKeyboard(),shape=RoundedCornerShape(16.dp),enabled=!vm.busy,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Ascii))
         PasswordField(password,"密码 · 至少 8 位",{password=it.take(128)},!vm.busy)
         if(register) PasswordField(confirm,"再次输入密码",{confirm=it.take(128)},!vm.busy)
         if(register) Row(verticalAlignment=Alignment.CenterVertically) {
@@ -81,61 +70,12 @@ import com.handcats.app.ui.theme.*
             }
             if(localError==null) vm.authenticate(register,username,password,nickname)
         },loading=vm.busy,symbol=Symbol.Arrow)
-        if(!register) TextButton(onClick={localError="忘记密码时，请联系你部署的服务管理员核验账号后重置；本版本尚未接入邮件或短信找回。"},modifier=Modifier.align(Alignment.CenterHorizontally)) {Text("忘记密码？")}
+        if(!register) TextButton(onClick={localError="忘记密码时，请联系拾猫管理员核验账号后重置；本版本尚未接入邮件或短信找回。"},modifier=Modifier.align(Alignment.CenterHorizontally)) {Text("忘记密码？")}
         Text("保持距离，不打扰，是最好的相遇。",color=Muted,style=MaterialTheme.typography.bodySmall,modifier=Modifier.align(Alignment.CenterHorizontally).padding(bottom=24.dp))
     }
 }
 
-@Composable fun SettingsScreen(vm: CatsViewModel, back: () -> Unit) {
-    val context = LocalContext.current
-    var server by rememberSaveable { mutableStateOf(vm.server) }
-    var permissionError by rememberSaveable { mutableStateOf(false) }
-    var addressError by remember { mutableStateOf<String?>(null) }
-    var pendingServer by rememberSaveable { mutableStateOf<String?>(null) }
-    val localNetworkPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        val address = pendingServer
-        pendingServer = null
-        permissionError = !granted
-        if (granted && address != null) vm.server(address, back)
-    }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal=24.dp),verticalArrangement=Arrangement.spacedBy(18.dp)) {
-        PageHeader("连接设置","连接到你的拾猫服务",back)
-        Paper {
-            Glyph(Symbol.Settings,Modifier.size(32.dp))
-            Spacer(Modifier.height(16.dp))
-            Text("让相遇安全抵达",style=MaterialTheme.typography.titleLarge)
-            Text("账号、照片和图鉴保存在你配置的服务器上。更换服务器会退出当前账号。",color=Muted,modifier=Modifier.padding(top=8.dp))
-        }
-        OutlinedTextField(server,{server=it},label={Text("服务地址")},placeholder={Text("http://192.168.1.10:8000")},singleLine=true,modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),enabled=!vm.busy,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri))
-        Text("手机与电脑连接同一 Wi-Fi 时，填写电脑的局域网 IP。安卓模拟器可使用 http://10.0.2.2:8000/。",color=Muted)
-        Text("本地调试支持 HTTP；部署到公网时请使用 HTTPS，保护账号和照片传输。",style=MaterialTheme.typography.bodySmall,color=Muted)
-        if (permissionError) {
-            Text("连接电脑需要本地网络权限。请在系统设置中允许拾猫访问本地网络，然后返回重试。", color=MaterialTheme.colorScheme.error)
-            TextButton(onClick={context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))}) { Text("打开应用设置") }
-        }
-        addressError?.let { Text(it, color=MaterialTheme.colorScheme.error) }
-        PrimaryButton("测试连接并保存",{
-            addressError = null
-            val normalized = try { ApiClient.normalize(server) } catch (e: IllegalArgumentException) {
-                addressError = e.message
-                null
-            }
-            if (normalized != null) {
-                if (Build.VERSION.SDK_INT >= 37 && ApiClient.isLocalServer(normalized) &&
-                    ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED) {
-                    pendingServer = normalized
-                    localNetworkPermission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
-                } else {
-                    permissionError = false
-                    vm.server(normalized, back)
-                }
-            }
-        },loading=vm.busy,symbol=Symbol.Check)
-        Spacer(Modifier.height(16.dp))
-    }
-}
-
-@Composable fun ProfileScreen(vm: CatsViewModel, settings: () -> Unit, privacy: () -> Unit, history: () -> Unit) {
+@Composable fun ProfileScreen(vm: CatsViewModel, privacy: () -> Unit, history: () -> Unit) {
     var dialog by remember { mutableStateOf<String?>(null) }
     var nickname by remember { mutableStateOf(vm.user?.nickname.orEmpty()) }
     var oldPassword by remember { mutableStateOf("") }
@@ -143,7 +83,7 @@ import com.handcats.app.ui.theme.*
     var confirmation by remember { mutableStateOf("") }
     var removalPassword by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal=24.dp),verticalArrangement=Arrangement.spacedBy(18.dp)) {
-        PageHeader("我的","把小小的喜欢，慢慢收集")
+        PageHeader("我的","把小小的爱，慢慢收集")
         Paper(color=Mint) {
             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(16.dp)) {
                 CatArt(modifier=Modifier.size(88.dp))
@@ -163,16 +103,14 @@ import com.handcats.app.ui.theme.*
             HorizontalDivider(color=Line)
             MenuRow(Symbol.Lock,"修改密码","保护你的拾猫账号") {dialog="password"}
             HorizontalDivider(color=Line)
-            MenuRow(Symbol.Settings,"连接设置","管理你的服务地址",settings)
-            HorizontalDivider(color=Line)
             MenuRow(Symbol.Leaf,"关于拾猫","使用与隐私说明",privacy)
         }
         OutlinedButton(onClick={dialog="logout"},modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),enabled=!vm.busy) {Text("退出登录")}
         TextButton(onClick={vm.clearMessage();removalPassword="";dialog="remove"},modifier=Modifier.align(Alignment.CenterHorizontally),enabled=!vm.busy) {Text("注销账号",color=MaterialTheme.colorScheme.error)}
-        Text("拾猫 1.0 · 小小相遇，大大世界",style=MaterialTheme.typography.bodySmall,color=Muted,modifier=Modifier.align(Alignment.CenterHorizontally).padding(bottom=24.dp))
+        Text("拾猫 ${BuildConfig.VERSION_NAME} · 小小相遇，大大世界",style=MaterialTheme.typography.bodySmall,color=Muted,modifier=Modifier.align(Alignment.CenterHorizontally).padding(bottom=24.dp))
     }
-    if(dialog=="nickname") AlertDialog(onDismissRequest={if(!vm.busy)dialog=null},title={Text("给自己一个新称呼")},text={OutlinedTextField(nickname,{nickname=it.take(30)},label={Text("昵称")},singleLine=true)},confirmButton={TextButton(onClick={vm.nickname(nickname){dialog=null}},enabled=nickname.isNotBlank()&&!vm.busy){Text("保存")}},dismissButton={TextButton(onClick={dialog=null},enabled=!vm.busy){Text("取消")}})
-    if(dialog=="password") AlertDialog(onDismissRequest={if(!vm.busy)dialog=null},title={Text("修改密码")},text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){
+    if(dialog=="nickname") AlertDialog(onDismissRequest={if(!vm.busy)dialog=null},title={Text("给自己一个新称呼")},text={OutlinedTextField(nickname,{nickname=it.take(30)},label={Text("昵称")},singleLine=true,modifier=Modifier.fillMaxWidth().keepVisibleAboveKeyboard())},confirmButton={TextButton(onClick={vm.nickname(nickname){dialog=null}},enabled=nickname.isNotBlank()&&!vm.busy){Text("保存")}},dismissButton={TextButton(onClick={dialog=null},enabled=!vm.busy){Text("取消")}})
+    if(dialog=="password") AlertDialog(onDismissRequest={if(!vm.busy)dialog=null},title={Text("修改密码")},text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)){
         PasswordField(oldPassword,"原密码",{oldPassword=it.take(128)})
         PasswordField(newPassword,"新密码 · 至少 8 位",{newPassword=it.take(128)})
         PasswordField(confirmation,"确认新密码",{confirmation=it.take(128)})
@@ -180,7 +118,7 @@ import com.handcats.app.ui.theme.*
         vm.error?.let{Text(it,color=MaterialTheme.colorScheme.error)}
     }},confirmButton={TextButton(onClick={vm.password(oldPassword,newPassword){dialog=null}},enabled=oldPassword.isNotEmpty()&&newPassword.length>=8&&newPassword==confirmation&&!vm.busy){Text("确认修改")}},dismissButton={TextButton(onClick={dialog=null;oldPassword="";newPassword="";confirmation=""},enabled=!vm.busy){Text("取消")}})
     if(dialog=="logout") AlertDialog(onDismissRequest={if(!vm.busy)dialog=null},title={Text("暂时告别？")},text={Column{Text("照片和图鉴会保留在服务器，重新登录就能继续收集。");vm.error?.let{Text(it,color=MaterialTheme.colorScheme.error)}}},confirmButton={TextButton(onClick={vm.logout{dialog=null}},enabled=!vm.busy){Text("退出登录")}},dismissButton={TextButton(onClick={dialog=null},enabled=!vm.busy){Text("继续拾猫")}})
-    if(dialog=="remove") AlertDialog(onDismissRequest={if(!vm.busy){dialog=null;removalPassword=""}},title={Text("永久注销账号？")},text={Column(verticalArrangement=Arrangement.spacedBy(12.dp)){
+    if(dialog=="remove") AlertDialog(onDismissRequest={if(!vm.busy){dialog=null;removalPassword=""}},title={Text("永久注销账号？")},text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){
         Text("账号、照片、手记和收集进度将全部删除，无法恢复。请输入密码确认。")
         PasswordField(removalPassword,"当前密码",{removalPassword=it.take(128)},!vm.busy)
         vm.error?.let{Text(it,color=MaterialTheme.colorScheme.error)}
@@ -196,12 +134,13 @@ import com.handcats.app.ui.theme.*
 
 @Composable fun AboutScreen(back: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal=24.dp),verticalArrangement=Arrangement.spacedBy(18.dp)) {
-        PageHeader("关于拾猫","拾猫 · 1.0",back)
+        PageHeader("关于拾猫","拾猫 · ${BuildConfig.VERSION_NAME}",back)
         CatArt(modifier=Modifier.size(160.dp).align(Alignment.CenterHorizontally))
         Text("收集相遇，\n也保留温柔。",style=MaterialTheme.typography.headlineLarge)
         listOf(
             "识别与图鉴" to "拾猫通过照片检测猫咪并提供外观类别参考。模型可能误判，置信度也不代表血统鉴定结果。请核对识别结果后再收进图鉴；未识别到类别的照片仍会保存为相遇记录。",
-            "你的数据" to "注册时保存账号、昵称和经过加盐哈希的密码。上传照片后保存照片、识别结果、笔记和收集状态。图片会移除 EXIF 信息，不主动收集地理位置。数据保存在连接设置指定的服务器，服务管理员具备管理权限。",
+            "图像处理" to "照片由服务器上的识别模型处理。未检测到目标时会自动补充识别；主动使用智能复核时也会将照片交由 DeepSeek 进行图像分析。结果均需由你核对后再收进图鉴。",
+            "你的数据" to "注册时保存账号、昵称和经过加盐哈希的密码。上传照片后保存照片、识别结果、笔记和收集状态。图片会移除 EXIF 信息，不主动收集地理位置。数据保存在拾猫云端服务器，服务管理员具备管理权限。",
             "权限与删除" to "相机仅在拍摄时使用。选相册使用系统照片选择器，不要求访问整个相册。记录详情可删除照片及对应记录；若没有该类别的其他确认记录，图鉴会恢复未点亮状态。我的页面可输入密码注销账号，删除账号及全部相遇数据。",
             "温柔的拍摄约定" to "保持距离，不追赶、不惊吓，不使用闪光灯直照眼睛。不要为了拍摄移动幼猫。需要救助时联系当地正规动物救助机构。",
         ).forEach { (title,body) -> Paper {Text(title,style=MaterialTheme.typography.titleMedium);Spacer(Modifier.height(8.dp));Text(body,color=Muted)} }

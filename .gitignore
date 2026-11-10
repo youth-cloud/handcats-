@@ -1,4 +1,4 @@
-# Only application source and repository configuration belong at the root.
+# Repository boundary: everything at the workspace root is local unless listed.
 /*
 !/.gitignore
 !/.gitattributes
@@ -7,7 +7,14 @@
 !/android/
 !/backend/
 
-# Android source, tests and Gradle wrapper.
+# CI definitions only; no local reports or attachments.
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/*.yml
+!/.github/workflows/*.yaml
+
+# Android build inputs. SDK paths, IDE state and build output stay local.
 /android/*
 !/android/app/
 !/android/gradle/
@@ -16,35 +23,62 @@
 !/android/gradle.properties
 !/android/settings.gradle.kts
 !/android/build.gradle.kts
+/android/gradle/*
+!/android/gradle/wrapper/
+/android/gradle/wrapper/*
+!/android/gradle/wrapper/gradle-wrapper.jar
+!/android/gradle/wrapper/gradle-wrapper.properties
 /android/app/*
 !/android/app/src/
 !/android/app/build.gradle.kts
 !/android/app/proguard-rules.pro
+/android/app/src/*
+!/android/app/src/main/
+!/android/app/src/test/
 # Local device journeys and screenshots are not part of CI.
 /android/app/src/androidTest/
 
-# API and automated tests, without local deployment scripts.
+# API runtime and regression test source belong in the repository.
 /backend/*
 !/backend/app/
 !/backend/tests/
 !/backend/run.py
 !/backend/requirements.txt
 !/backend/requirements-dev.txt
+!/backend/requirements-onnx.txt
 !/backend/.env.example
 !/backend/deploy/
-!/backend/deploy/**
 !/backend/scripts/
+
+# Explicit deployment inputs; version-specific update records remain local.
+/backend/deploy/*
+!/backend/deploy/README.md
+!/backend/deploy/production.env.example
+!/backend/deploy/backup.sh
+!/backend/deploy/handcats.service
+!/backend/deploy/handcats-backup.service
+!/backend/deploy/handcats-backup.timer
+!/backend/deploy/nginx-http.conf
+!/backend/deploy/nginx-https.conf
+
+# Reusable administration tools only; no machine-specific validation scripts.
+/backend/scripts/*
 !/backend/scripts/benchmark_model.py
 !/backend/scripts/check_concurrency.py
 !/backend/scripts/create_test_user.py
-!/backend/requirements-onnx.txt
+!/backend/scripts/init_db.py
 
-# IDE, build and Python caches.
+# Editor, OS and build caches, including copies under allowed directories.
 .idea/
+.vscode/
 .gradle/
 .kotlin/
 build/
+dist/
 captures/
+screenshots/
+reports/
+test-results/
 local.properties
 __pycache__/
 *.py[cod]
@@ -53,27 +87,38 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+node_modules/
 .coverage*
 coverage.xml
 htmlcov/
-test-results/
 *.log
 *.tmp
+*.bak
+*.orig
+*.rej
+*~
 .DS_Store
 Thumbs.db
 
-# Credentials and signing material.
+# Secrets and signing material. Only the reviewed templates are allowed.
 .env
 .env.*
-!.env.example
+*.env
+*.env.*
 *.jks
 *.keystore
 *.pem
 *.key
+*.p12
+*.pfx
 key.properties
 keystore.properties
+credentials/
+secrets/
+!/backend/.env.example
+!/backend/deploy/production.env.example
 
-# Datasets, training output, weights and exported models.
+# Datasets, training output and model exports.
 训练集/
 datasets/
 dataset_manifests/
@@ -81,6 +126,7 @@ deletion_manifests/
 runs/
 weights/
 models/
+offline-packages/
 *.pt
 *.pth
 *.onnx
@@ -92,8 +138,10 @@ models/
 *.ckpt
 *.cache
 
-# Local data, archives and generated packages.
+# User data, database exports, installers and release packages.
 storage/
+uploads/
+photos/
 backups/
 releases/
 *.apk
@@ -106,3 +154,4 @@ releases/
 *.sqlite*
 *.dump
 *.sql
+*.sha256

@@ -26,6 +26,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.handcats.app.data.CatsViewModel
+import com.handcats.app.data.pendingReview
+import com.handcats.app.data.presentedObservation
 import com.handcats.app.data.remote.*
 import com.handcats.app.ui.*
 import com.handcats.app.ui.theme.*
@@ -72,9 +74,9 @@ import com.handcats.app.ui.theme.*
 }
 
 @Composable fun CatCard(cat: CatType,modifier: Modifier=Modifier,click: () -> Unit) {
-    Column(modifier.clip(RoundedCornerShape(8.dp)).background(Color.White).clickable(onClick=click)) {
+    Column(modifier.clip(RoundedCornerShape(24.dp)).background(Color.White).clickable(onClick=click)) {
         Box(Modifier.fillMaxWidth().aspectRatio(1f).background(if(cat.group=="田园猫")Mint else Peach)) {
-            CatCover(cat.code,Modifier.fillMaxSize(),ContentScale.Fit)
+            CatCover(cat.code,Modifier.fillMaxSize(),ContentScale.Crop)
             if(cat.collected) Box(Modifier.align(Alignment.TopEnd).padding(8.dp)){Tag("已点亮",background=Color.White)}
         }
         Column(Modifier.padding(14.dp),verticalArrangement=Arrangement.spacedBy(5.dp)) {
@@ -89,8 +91,8 @@ import com.handcats.app.ui.theme.*
     var filter by rememberSaveable{mutableStateOf("全部")}
     val list=vm.cats.filter { (query.isBlank() || it.name.contains(query,true) || it.subtitle.contains(query,true)) && when(filter){"已点亮"->it.collected;"待遇见"->!it.collected;"田园猫"->it.group=="田园猫";else->true} }
     LazyVerticalGrid(columns=GridCells.Adaptive(148.dp),modifier=Modifier.fillMaxSize(),contentPadding=PaddingValues(start=24.dp,end=24.dp,bottom=24.dp),horizontalArrangement=Arrangement.spacedBy(14.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
-        item(span={GridItemSpan(maxLineSpan)}){PageHeader("猫咪图鉴","${vm.cats.count{it.collected}} / ${vm.cats.size} 已点亮 · 把喜欢慢慢收集",action={IconButton(onClick=vm::refresh,enabled=!vm.refreshing,modifier=Modifier.semantics{contentDescription="刷新图鉴"}){Glyph(Symbol.Refresh)}})}
-        item(span={GridItemSpan(maxLineSpan)}){OutlinedTextField(query,{query=it},placeholder={Text("寻找一种猫咪…")},singleLine=true,shape=RoundedCornerShape(16.dp),modifier=Modifier.fillMaxWidth(),leadingIcon={Glyph(Symbol.Book)})}
+        item(span={GridItemSpan(maxLineSpan)}){PageHeader("猫咪图鉴","${vm.cats.count{it.collected}} / ${vm.cats.size} 已点亮",action={IconButton(onClick=vm::refresh,enabled=!vm.refreshing,modifier=Modifier.semantics{contentDescription="刷新图鉴"}){Glyph(Symbol.Refresh)}})}
+        item(span={GridItemSpan(maxLineSpan)}){OutlinedTextField(query,{query=it},placeholder={Text("寻找一种猫咪…")},singleLine=true,shape=RoundedCornerShape(16.dp),modifier=Modifier.fillMaxWidth().keepVisibleAboveKeyboard(),leadingIcon={Glyph(Symbol.Book)})}
         item(span={GridItemSpan(maxLineSpan)}){Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)){listOf("全部","已点亮","待遇见","田园猫").forEach{label->FilterChip(filter==label,{filter=label},label={Text(label)})}}}
         if(list.isEmpty()) item(span={GridItemSpan(maxLineSpan)}){EmptyState(if(vm.cats.isEmpty())"图鉴暂未加载" else "这里还没有猫咪","试试其他关键词或筛选条件。",if(vm.cats.isEmpty())"重新加载" else "查看全部"){if(vm.cats.isEmpty())vm.refresh() else {query="";filter="全部"}}}
         items(list,key={it.code}){cat->CatCard(cat){detail(cat)}}
@@ -102,7 +104,7 @@ import com.handcats.app.ui.theme.*
     LaunchedEffect(cat.code) { vm.loadCategory(cat.code) }
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(start=24.dp,end=24.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(20.dp)) {
         item { PageHeader("猫咪档案",onBack=back) }
-        item { Box(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(8.dp)).background(Mint),contentAlignment=Alignment.Center){CatCover(cat.code,Modifier.fillMaxSize(),ContentScale.Fit);Box(Modifier.align(Alignment.TopStart).padding(20.dp)){Tag(cat.group,background=Color.White)}} }
+        item { Box(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(24.dp)).background(Mint),contentAlignment=Alignment.Center){CatCover(cat.code,Modifier.fillMaxSize(),ContentScale.Fit);Box(Modifier.align(Alignment.TopStart).padding(20.dp)){Tag(cat.group,background=Color.White)}} }
         item { Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(displayName(cat.name),style=MaterialTheme.typography.headlineMedium);Text(cat.subtitle,color=Muted)};Glyph(if(cat.collected)Symbol.Check else Symbol.Lock,Modifier.size(30.dp))} }
         item { Tag(if(cat.collected)"已点亮 · 确认收集 ${cat.encounters} 次" else "尚未确认收集") }
         item { Paper{Text("认识一下",style=MaterialTheme.typography.titleLarge);Spacer(Modifier.height(12.dp));Text(cat.description,color=Muted)} }
@@ -113,13 +115,13 @@ import com.handcats.app.ui.theme.*
                     Text("与它们的相遇",style=MaterialTheme.typography.titleLarge)
                     Text("本类别已保存 ${vm.categoryTotal} 条记录，包含待确认的识别结果",color=Muted,style=MaterialTheme.typography.bodySmall)
                 }
-                IconButton(onClick={vm.loadCategory(cat.code)},enabled=!vm.categoryLoading&&!vm.busy,modifier=Modifier.semantics{contentDescription="刷新同品种记录"}){Glyph(Symbol.Refresh)}
+                IconButton(onClick={vm.loadCategory(cat.code, force=true)},enabled=!vm.categoryLoading&&!vm.busy,modifier=Modifier.semantics{contentDescription="刷新同品种记录"}){Glyph(Symbol.Refresh)}
             }
         }
         if(vm.categoryLoading && vm.categoryObservations.isEmpty()) item { Box(Modifier.fillMaxWidth().padding(24.dp),contentAlignment=Alignment.Center){CircularProgressIndicator(Modifier.size(28.dp))} }
         if(!vm.categoryLoading && !vm.categoryFailed && vm.categoryObservations.isEmpty()) item { EmptyState("还没有它的相遇记录","拍照识别并保存后，就能在这里回看照片和手记。","去拍一张",camera) }
         items(vm.categoryObservations,key={it.id}) { item -> ObservationRow(vm,item){detail(item)} }
-        if(vm.categoryFailed) item { OutlinedButton(onClick={vm.clearMessage();vm.loadCategory(cat.code,more=vm.categoryObservations.isNotEmpty())},modifier=Modifier.fillMaxWidth()){Text("记录加载失败，点击重试")} }
+        if(vm.categoryFailed) item { OutlinedButton(onClick={vm.clearMessage();vm.loadCategory(cat.code,more=vm.categoryObservations.isNotEmpty(),force=true)},modifier=Modifier.fillMaxWidth()){Text("记录加载失败，点击重试")} }
         else if(vm.categoryObservations.size<vm.categoryTotal) item { OutlinedButton(onClick={vm.loadCategory(cat.code,more=true)},enabled=!vm.categoryLoading,modifier=Modifier.fillMaxWidth()){Text(if(vm.categoryLoading)"加载中…" else "加载更多同品种记录")} }
         item { PrimaryButton("去寻找这位朋友",camera,symbol=Symbol.Camera) }
     }
@@ -138,7 +140,7 @@ import com.handcats.app.ui.theme.*
 }
 
 @Composable fun ObservationRow(vm: CatsViewModel,item: Observation,click: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color.White).semantics{contentDescription="查看相遇记录 ${item.id}"}.clickable(onClick=click).padding(12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(14.dp)) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color.White).semantics{contentDescription="查看相遇记录 ${item.id}"}.clickable(onClick=click).padding(12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(14.dp)) {
         RemotePhoto(vm,item.imageUrl,Modifier.size(82.dp).clip(RoundedCornerShape(14.dp)))
         Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(5.dp)) {
             Text(observationTitle(item),style=MaterialTheme.typography.titleMedium,maxLines=2)
@@ -146,7 +148,7 @@ import com.handcats.app.ui.theme.*
             Text(displayDate(item.createdAt),style=MaterialTheme.typography.bodySmall,color=Muted)
             Text(if(item.confirmed)"已收进图鉴" else if(item.note.isNotBlank())item.note else "点击查看这次相遇",style=MaterialTheme.typography.bodySmall,color=if(item.confirmed)Forest else Muted,maxLines=1)
         }
-        Glyph(if(item.favorite)Symbol.Heart else Symbol.Arrow,Modifier.size(18.dp),if(item.favorite)Orange else Muted)
+        if(item.favorite) HeartIcon(Modifier.size(18.dp),filled=true) else Glyph(Symbol.Arrow,Modifier.size(18.dp),Muted)
     }
 }
 
@@ -154,22 +156,29 @@ import com.handcats.app.ui.theme.*
     val item=vm.selected
     if(item==null){EmptyState("这条记录已不在这里","返回查看其他相遇吧。","返回",back);return}
     var note by rememberSaveable(item.id,item.note){mutableStateOf(item.note)}
-    var confirmDelete by remember{mutableStateOf(false)}
     var focusedIndex by rememberSaveable(item.id){mutableStateOf<Int?>(null)}
     val savedIds = item.detections.filter { it.confirmed || (item.confirmed && item.confirmedDetectionIds == null && it.catCode != null) }.mapNotNull { it.id }
     var chosenIds by rememberSaveable(item.id, savedIds){mutableStateOf(savedIds)}
     val eligibleIds = item.detections.filter{it.catCode!=null}.mapNotNull{it.id}
     val canCollect=eligibleIds.isNotEmpty()
+    val multipleDetections=item.detections.size>1
+    val previewReview = pendingReview(item, vm.review?.takeIf { vm.reviewObservationId == item.id })
+    val presented = presentedObservation(item, previewReview)
+    val photoDetections = presented.detections
     val selectionChanged=chosenIds.toSet()!=savedIds.toSet()
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal=24.dp),verticalArrangement=Arrangement.spacedBy(18.dp)) {
-        PageHeader("这一次相遇",displayDate(item.createdAt),back,action={IconButton(onClick={vm.edit(item,ObservationEdit(favorite=!item.favorite))},enabled=!vm.busy,modifier=Modifier.semantics{contentDescription=if(item.favorite)"取消收藏" else "收藏照片"}){Glyph(Symbol.Heart,color=if(item.favorite)Orange else Muted)}})
-        RemotePhoto(vm,item.imageUrl,Modifier.fillMaxWidth().height(340.dp).clip(RoundedCornerShape(26.dp)),ContentScale.Fit,item.detections,focusedIndex)
-        Tag(if(item.confirmed)"已收集 ${savedIds.size} 项猫咪结果" else if(canCollect)"识别完成 · 请逐一核对" else "相遇已记录")
-        Text(observationTitle(item),style=MaterialTheme.typography.headlineMedium)
-        if(item.detections.size>1)Text("共保留 ${item.detections.size} 项识别与复核结果。带定位框的结果可在照片上按编号核对。",color=Muted)
-        Text(item.message,color=Muted)
-        if (reviewObservationId(vm, item)) {
-            vm.review?.let { result ->
+        PageHeader("这一次相遇",displayDate(item.createdAt),back,action={FavoriteButton(item.favorite,enabled=!vm.busy,onClick={vm.edit(item,ObservationEdit(favorite=!item.favorite))})})
+        RemotePhoto(vm,item.imageUrl,Modifier.fillMaxWidth().height(340.dp).clip(RoundedCornerShape(26.dp)),ContentScale.Fit,photoDetections,if(previewReview==null)focusedIndex else null)
+        if(previewReview == null) {
+            Tag(if(item.confirmed) { if(multipleDetections)"已收集 ${savedIds.size} 项猫咪结果" else "已收进图鉴" } else if(canCollect) { if(multipleDetections)"识别完成 · 请逐一核对" else "识别完成" } else "相遇已记录")
+        } else Tag("复核完成 · 待确认")
+        Text(observationTitle(presented),style=MaterialTheme.typography.headlineMedium)
+        if(photoDetections.size>1)Text("当前有 ${photoDetections.size} 项猫咪结果，可在照片上按编号核对。",color=Muted)
+        if(previewReview==null) item.detections.singleOrNull()?.let { detection ->
+            Text("${if(detection.source=="deepseek")"智能复核" else "识别置信度"} · ${(detection.confidence*100).toInt()}%",color=Muted,style=MaterialTheme.typography.bodySmall)
+        }
+        Text(presented.message,color=Muted)
+        (if(vm.reviewing) null else previewReview ?: vm.review?.takeIf { reviewObservationId(vm,item) && !it.success })?.let { result ->
                 Paper(color = if (result.success) Mint else Peach) {
                     Text("智能复核", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(6.dp))
@@ -178,7 +187,7 @@ import com.handcats.app.ui.theme.*
                     result.suggestions.forEachIndexed { index, suggestion ->
                         Spacer(Modifier.height(8.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(suggestion.label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                            Text("${index + 1} · ${suggestion.label}", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                             Text("${(suggestion.confidence * 100).toInt()}%", color = Forest, fontWeight = FontWeight.Bold)
                             if (suggestion.catCode != null && result.reviewId != null) Checkbox(
                                 checked = index in selectedReviewIndices,
@@ -187,25 +196,36 @@ import com.handcats.app.ui.theme.*
                                 modifier = Modifier.semantics { contentDescription = "收集复核结果 ${index + 1}：${suggestion.label}" }
                             )
                         }
+                        if (suggestion.boundingBox.size != 4) Text("未取得可靠位置，无法在照片上画框", color = Muted, style = MaterialTheme.typography.bodySmall)
                         if (suggestion.catCode == null) Text("此物种或类别还未添加到图鉴中，请等待后续更新。", color = Muted, style = MaterialTheme.typography.bodySmall)
                     }
                     if (result.explanation.isNotBlank()) Text(result.explanation, color = Muted, style = MaterialTheme.typography.bodySmall)
                     if (result.success && result.reviewId != null && result.suggestions.any { it.catCode != null }) {
                         Spacer(Modifier.height(12.dp))
-                        Text("勾选正确的复核结果收进图鉴。保存后，本照片原先勾选的识别结果将撤销收集，避免重复或错误点亮。", color = Muted, style = MaterialTheme.typography.bodySmall)
+                        Text("勾选正确的复核结果收进图鉴。保存后将替换本照片先前的识别结果和收集选择。", color = Muted, style = MaterialTheme.typography.bodySmall)
                         PrimaryButton("采用所选结果，收进图鉴", { vm.applyReview(item, result, selectedReviewIndices) }, enabled = selectedReviewIndices.isNotEmpty(), loading = vm.busy, symbol = Symbol.Book)
                     }
                 }
-            }
         }
-        OutlinedButton(
+        Button(
             onClick = { vm.requestReview(item) },
-            enabled = !vm.busy,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) { Text(if (vm.reviewing) "正在智能复核…" else if (vm.review != null && reviewObservationId(vm, item)) "重新智能复核" else "识别有误？请智能复核") }
+            enabled = !vm.busy && item.reviewAttempts < item.reviewLimit,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF355C7D), contentColor = Color.White,
+                disabledContainerColor = Color(0xFF355C7D).copy(alpha = .55f),
+                disabledContentColor = Color.White.copy(alpha = .85f)
+            ),
+            contentPadding = PaddingValues(16.dp)
+        ) {
+            if (vm.reviewing) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+            else Glyph(Symbol.Refresh, color = Color.White)
+            Spacer(Modifier.width(10.dp))
+            Text(if (vm.reviewing) "正在智能复核…" else if (item.reviewAttempts >= item.reviewLimit) "已达到智能复核上限" else if (vm.review != null && reviewObservationId(vm, item)) "重新智能复核" else "识别有误？请智能复核")
+        }
         if (vm.reviewing) Text("正在查看这张照片，结果返回后会显示在这里。", color = Muted, style = MaterialTheme.typography.bodySmall)
-        if(item.detections.isNotEmpty()) Paper {
+        if(multipleDetections && previewReview==null) Paper {
             Text("逐只核对",style=MaterialTheme.typography.titleMedium)
             item.detections.forEachIndexed{index,d->
                 Spacer(Modifier.height(14.dp))
@@ -218,26 +238,34 @@ import com.handcats.app.ui.theme.*
                     }
                     Text(if(d.catCode==null)"猫 · 类别待确定" else displayName(d.label),style=MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(6.dp));LinearProgressIndicator(progress={d.confidence},modifier=Modifier.fillMaxWidth().height(4.dp),trackColor=Mint,color=detectionColor(index))
-                    Spacer(Modifier.height(6.dp));Text(if(d.id in chosenIds)"已勾选 · 保存后收进图鉴" else if(d.catCode==null)"暂未匹配图鉴类别" else "核对正确后勾选收集",style=MaterialTheme.typography.bodySmall,color=Muted)
+                    Spacer(Modifier.height(6.dp));if(d.boundingBox.size != 4) Text("未取得可靠位置，无法在照片上画框",style=MaterialTheme.typography.bodySmall,color=Muted)
+                    Text(if(d.id in chosenIds)"已勾选 · 保存后收进图鉴" else if(d.catCode==null)"暂未匹配图鉴类别" else "核对正确后勾选收集",style=MaterialTheme.typography.bodySmall,color=Muted)
                 }
             }
-            Spacer(Modifier.height(14.dp));Text("模型可能对同一只猫重复出框。请按编号核对位置与类别，取消错误或重复结果；未勾选的结果仍保留在这条手记里。",style=MaterialTheme.typography.bodySmall,color=Muted)
+            Spacer(Modifier.height(14.dp));Text("请按编号核对位置与类别，仅勾选正确的猫咪。复核结果的位置为估计值；未能定位的结果会单独标注。",style=MaterialTheme.typography.bodySmall,color=Muted)
         }
-        if(canCollect) {
-            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
-                TextButton(onClick={chosenIds=eligibleIds},enabled=!vm.busy){Text("全选正确结果")}
-                TextButton(onClick={chosenIds=emptyList()},enabled=!vm.busy){Text("取消全选")}
+        if(canCollect && previewReview==null) {
+            if(multipleDetections) {
+                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+                    TextButton(onClick={chosenIds=eligibleIds},enabled=!vm.busy){Text("全选正确结果")}
+                    TextButton(onClick={chosenIds=emptyList()},enabled=!vm.busy){Text("取消全选")}
+                }
+                PrimaryButton(if(chosenIds.isEmpty())"保存为未收集" else "保存所选 ${chosenIds.size} 项，收进图鉴",{vm.edit(item,ObservationEdit(confirmedDetectionIds=chosenIds))},enabled=selectionChanged,loading=vm.busy,symbol=Symbol.Book)
+                if(item.confirmed)OutlinedButton(onClick={vm.edit(item,ObservationEdit(confirmedDetectionIds=emptyList()))},enabled=!vm.busy,modifier=Modifier.fillMaxWidth()){Text("撤销这张照片的全部收集")}
+            } else if(item.confirmed) {
+                OutlinedButton(onClick={vm.edit(item,ObservationEdit(confirmedDetectionIds=emptyList()))},enabled=!vm.busy,modifier=Modifier.fillMaxWidth()){Text("撤销收集")}
+            } else {
+                PrimaryButton("确认品种，收进图鉴",{vm.edit(item,ObservationEdit(confirmedDetectionIds=eligibleIds))},loading=vm.busy,symbol=Symbol.Book)
             }
-            PrimaryButton(if(chosenIds.isEmpty())"保存为未收集" else "保存所选 ${chosenIds.size} 项，收进图鉴",{vm.edit(item,ObservationEdit(confirmedDetectionIds=chosenIds))},enabled=selectionChanged,loading=vm.busy,symbol=Symbol.Book)
-            if(item.confirmed)OutlinedButton(onClick={vm.edit(item,ObservationEdit(confirmedDetectionIds=emptyList()))},enabled=!vm.busy,modifier=Modifier.fillMaxWidth()){Text("撤销这张照片的全部收集")}
         }
-        OutlinedTextField(note,{note=it.take(500)},label={Text("给这次相遇留句话")},placeholder={Text("比如：在公园长椅旁，遇见了晒太阳的它。")},supportingText={Text("${note.length} / 500")},modifier=Modifier.fillMaxWidth(),minLines=3,shape=RoundedCornerShape(18.dp))
+        OutlinedTextField(note,{note=it.take(500)},label={Text("给这次相遇留句话")},placeholder={Text("比如：在公园长椅旁，遇见了晒太阳的它。")},supportingText={Text("${note.length} / 500")},modifier=Modifier.fillMaxWidth().keepVisibleAboveKeyboard(),minLines=3,shape=RoundedCornerShape(18.dp))
         if(note!=item.note) PrimaryButton("保存手记",{vm.edit(item,ObservationEdit(note=note))},loading=vm.busy)
         OutlinedButton(onClick=camera,enabled=!vm.busy,modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp)){Text("继续寻找下一只猫")}
-        TextButton(onClick={confirmDelete=true},enabled=!vm.busy,modifier=Modifier.align(Alignment.CenterHorizontally)){Text("删除这条相遇",color=MaterialTheme.colorScheme.error)}
+        HoldToDeleteButton(item.id,enabled=!vm.busy&&!vm.refreshing,onDelete={vm.delete(item){back()}})
+        Text("删除后，照片和手记无法恢复。",color=Muted,style=MaterialTheme.typography.bodySmall,modifier=Modifier.align(Alignment.CenterHorizontally))
         Spacer(Modifier.height(8.dp))
     }
-    if(confirmDelete)AlertDialog(onDismissRequest={if(!vm.busy)confirmDelete=false},title={Text("删除这次相遇？")},text={Column{Text("照片与识别记录将一起删除，无法恢复。若这是该类别唯一的收集记录，对应图鉴将恢复为待遇见。");vm.error?.let{Text(it,color=MaterialTheme.colorScheme.error)}}},confirmButton={TextButton(onClick={vm.delete(item){confirmDelete=false;back()}},enabled=!vm.busy){Text("确认删除",color=MaterialTheme.colorScheme.error)}},dismissButton={TextButton(onClick={confirmDelete=false},enabled=!vm.busy){Text("保留")}})
+
 }
 
 private fun reviewObservationId(vm: CatsViewModel, item: Observation): Boolean = vm.reviewObservationId == item.id

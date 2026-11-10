@@ -32,7 +32,7 @@ object ApiClient {
         .followRedirects(false).followSslRedirects(false)
         .addInterceptor { chain ->
             val request = chain.request().newBuilder()
-            token()?.let { request.header("Authorization", "Bearer $it") }
+            if (chain.request().header("Authorization") == null) token()?.let { request.header("Authorization", "Bearer $it") }
             chain.proceed(request.build())
         }.build()
     fun create(baseUrl: String, client: OkHttpClient): HandCatsApi = Retrofit.Builder()
