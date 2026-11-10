@@ -28,8 +28,10 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v3
-      - name: Install Android SDK
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+        with:
+          # The action's default includes the retired "tools" SDK package.
+          packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: 'false'
       - uses: gradle/actions/setup-gradle@v4
       - name: Build, lint and test
         run: ./gradlew :app:assembleDebug :app:lintDebug :app:testDebugUnitTest --no-daemon --console=plain
@@ -49,14 +51,13 @@ jobs:
           POSTGRES_PASSWORD: ci-only-password
           POSTGRES_DB: handcats_test
         ports:
-          - 5432:5432
+          - 5432/tcp
         options: >-
-          --health-cmd 'pg_isready -U handcats -d handcats_test'
+          --health-cmd "pg_isready -U handcats -d handcats_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql+asyncpg://handcats:ci-only-password@127.0.0.1:5432/handcats_test
       MODEL_WEIGHTS_PATH: ''
       YOLO_AUTOINSTALL: 'false'
     steps:
@@ -76,4 +77,6 @@ jobs:
           python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements-dev.txt
       - name: Run API tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://handcats:ci-only-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/handcats_test
         run: python -m unittest discover -s tests -v
